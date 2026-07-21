@@ -116,15 +116,15 @@ const SOURCES = [
     notes: 'Resolved 2026-07-21: the footer "RSS" link led to a links page listing per-category feeds; "Obchodněprávní shrnutí" (commercial-law case summaries) is the closest fit for insolvency/restructuring case law. Verified live via curl (valid RSS 0.91, current items). Other profipravo category feeds exist (procesni-shrnuti.php, monitoring.php, clanky-a-komentare.php, zpravodajstvi.php) if broader coverage is wanted later. FIR-16 free-content-only restriction applies — this is the public feed, not paywalled content.',
   },
   {
-    id: 'nss-rss',
-    name: 'NSS — Nejvyšší správní soud (administrative supreme court)',
+    id: 'nss-sbirka',
+    name: 'NSS — Sbírka rozhodnutí Nejvyššího správního soudu (curated collection)',
     tier: 'B',
-    module: r('./pendingStub.js'),
+    module: r('./nss-sbirka-scrape.js'),
     config: {
-      notes: 'DROPPED FIR-25 (2026-07-21): confirmed NSS has no RSS feed. nssoud.cz/rss 301-redirects to www.nssoud.cz/rss, which returns HTTP 404 but serves the full 70KB TYPO3 site page (title "Nejvyšší správní soud — Oficiální webové stránky") instead of a blank error — a soft-404. This is why a browser makes it look like the URL "exists and is accessible": the page renders normally, but the response is 404 HTML, not an RSS/XML feed (Content-Type text/html, no <rss>/<feed>). sbirka.nssoud.cz/rss does not exist. The judikatura search UI at vyhledavac.nssoud.cz (reachable, HTTP 200) offers only a per-query "Export" (CSV/PDF), not a subscribable feed. No automated-feed path exists without building a custom scraper against the search UI — out of scope for the pilot.',
-      action: 'None — dropped from pilot scope. If NSS administrative case law (e.g. tax claims in insolvency proceedings) is later flagged as a gap, revisit as a custom scraper against vyhledavac.nssoud.cz, not an RSS source.',
+      keywords: ['insolven', 'reorganizac', 'restrukturalizac', 'konkurs', 'oddlužen', 'věřitel', 'úpadek', 'odpůrčí', '182/2006'],
     },
-    status: 'dropped',
+    status: 'active',
+    notes: 'Resolved FIR-25 (2026-07-21, rev 2 after board push-back): NSS has NO RSS/API (confirmed — nssoud.cz/rss is a soft-404, sbirka.nssoud.cz/rss does not exist), but the board correctly pointed out that decisions ARE accessible at sbirka.nssoud.cz. sbirka.nssoud.cz is the Sbírka rozhodnutí NSS — the editorially-curated collection of significant administrative-court decisions, published in periodic issues ("Vydání N/YYYY"). It is low-volume and cleanly structured (stable per-decision URLs .../<slug>.p<NNNN>.html), so a scraper is viable where RSS is not. sources/nss-sbirka-scrape.js scrapes /cz/aktualni-vydani, enriches each decision from its detail page (headnote + cited statutes "předpisy" + legal thesis), and keyword-filters on that content (not just the slug) so tax/public-law decisions that reference the insolvenční zákon (182/2006 Sb.) or insolvency proceedings are caught. Verified live end-to-end 2026-07-21: Vydání 6/2026 yields 4 decisions, 0 insolvency-relevant this issue (expected — NSS is admin law; it contributes only when an issue genuinely touches insolvency). Uses a browser User-Agent. NOTE: this is the curated Sbírka, not the full NSS docket; the complete judikatura firehose lives at vyhledavac.nssoud.cz and is intentionally NOT used — the curated collection is the right precision/volume tradeoff for a Tier B digest source.',
   },
   {
     id: 'zakonyprolidi-rss',

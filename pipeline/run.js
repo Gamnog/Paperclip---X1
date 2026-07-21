@@ -45,16 +45,20 @@ async function runNsSbirka(seen) {
 }
 
 async function runGenericSources(seen, sourceResults) {
-  const rssModule = require('./sources/rss-generic');
+  // Every active source except ns-sbirka (which has a bespoke parser wired in
+  // main()) exposes a module with fetchItems() returning the common Item shape:
+  // rss-generic for feed sources, nss-sbirka-scrape for the NSS scraper, etc.
+  // Dispatch by the source's own module rather than assuming RSS.
   const activeSources = SOURCES.filter(
-    (s) => s.status === 'active' && s.id !== 'ns-sbirka' && s.module.includes('rss-generic')
+    (s) => s.status === 'active' && s.id !== 'ns-sbirka'
   );
 
   const allItems = [];
   for (const src of activeSources) {
     try {
-      console.log(`[${src.id}] fetching ${src.config.feedUrl}`);
-      const items = await rssModule.fetchItems({ ...src.config, sourceId: src.id, sourceName: src.name });
+      const mod = require(src.module);
+      console.log(`[${src.id}] fetching (${path.basename(src.module)})`);
+      const items = await mod.fetchItems({ ...src.config, sourceId: src.id, sourceName: src.name });
       const newItems = items.filter((item) => {
         if (!item.id || seen.has(item.id)) return false;
         seen.markSeen(item.id, { title: item.title, url: item.url, sourceId: src.id });
