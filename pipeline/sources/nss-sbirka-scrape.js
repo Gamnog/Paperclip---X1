@@ -79,6 +79,12 @@ const BACKFILL_REQUEST_DELAY_MS = 1200;
 // resumes from the committed cache.
 const MAX_CONSECUTIVE_PAGE_FAILURES = 5;
 
+// Progress-log cadence for the long full-archive backfill (weekly runs are tiny
+// and stay quiet). Purely observability: a multi-hour crawl that only logs
+// "starting" then nothing for an hour is indistinguishable from a hang.
+const PROGRESS_EVERY_PAGES = 25;
+const PROGRESS_EVERY_ITEMS = 50;
+
 // _sort=datum*desc is required: the endpoint's default sort ("sort*desc",
 // relevance) is NOT stable for an empty query — live testing (FIR-32) showed
 // the same page number returning different, non-contiguous decision sets on
@@ -365,7 +371,16 @@ async function fetchItems({
     }
 
     // Resolve the backfill's last page once, from the first page's links.
-    if (fullBackfill && !Number.isFinite(hardCap)) hardCap = parseMaxPage(html);
+    if (fullBackfill && !Number.isFinite(hardCap)) {
+      hardCap = parseMaxPage(html);
+      console.log(`[nss-sbirka] stage 1: walking ${hardCap} search page(s) (date-desc)`);
+    }
+    // Heartbeat: the full backfill paginates hundreds of pages with no other
+    // output, so a silent run looks hung. Emit a periodic progress line so the
+    // operator can see it is advancing (weekly runs are ~5 pages -> no noise).
+    if (fullBackfill && page % PROGRESS_EVERY_PAGES === 0) {
+      console.log(`[nss-sbirka] stage 1: page ${page}/${hardCap}, ${candidates.size} candidate(s) so far`);
+    }
     if (page >= hardCap) break;
 
     page += 1;
@@ -377,7 +392,20 @@ async function fetchItems({
   // backfill resumes from committed progress.
   const cache = loadCache(cachePath);
   let fetchedSinceFlush = 0;
+  const totalCandidates = candidates.size;
+  const alreadyCached = [...candidates.values()].filter(
+    (e) => cache[e.pid] && typeof cache[e.pid].text === 'string'
+  ).length;
+  console.log(
+    `[nss-sbirka] stage 1 done: ${totalCandidates} unseen candidate(s) ` +
+      `(${alreadyCached} already cached); stage 2 detail-fetching the rest…`
+  );
+  let detailProcessed = 0;
   for (const e of candidates.values()) {
+    detailProcessed += 1;
+    if (fullBackfill && detailProcessed % PROGRESS_EVERY_ITEMS === 0) {
+      console.log(`[nss-sbirka] stage 2: ${detailProcessed}/${totalCandidates} candidate(s) processed`);
+    }
     if (cache[e.pid] && typeof cache[e.pid].text === 'string') continue; // already scraped
     let detail;
     try {
@@ -407,8 +435,14 @@ async function fetchItems({
   if (fetchedSinceFlush > 0) saveCache(cachePath, cache);
 
   // Stage 3: classify each candidate's full text; keep only the relevant ones.
+  console.log(`[nss-sbirka] stage 2 done; stage 3 classifying ${candidates.size} candidate(s)…`);
   const items = [];
+  let classified = 0;
   for (const e of candidates.values()) {
+    classified += 1;
+    if (fullBackfill && classified % PROGRESS_EVERY_ITEMS === 0) {
+      console.log(`[nss-sbirka] stage 3: ${classified}/${candidates.size} classified, ${items.length} relevant so far`);
+    }
     const c = cache[e.pid] || {};
     const title = c.title || e.title || `NSS rozhodnutí p${e.pid}`;
     const text = c.text || e.snippet || '';
