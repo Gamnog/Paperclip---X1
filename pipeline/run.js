@@ -58,7 +58,12 @@ async function runGenericSources(seen, sourceResults) {
     try {
       const mod = require(src.module);
       console.log(`[${src.id}] fetching (${path.basename(src.module)})`);
-      const items = await mod.fetchItems({ ...src.config, sourceId: src.id, sourceName: src.name });
+      const items = await mod.fetchItems({
+        ...src.config,
+        sourceId: src.id,
+        sourceName: src.name,
+        seenHasId: (id) => seen.has(id),
+      });
       const newItems = items.filter((item) => {
         if (!item.id || seen.has(item.id)) return false;
         seen.markSeen(item.id, { title: item.title, url: item.url, sourceId: src.id });
