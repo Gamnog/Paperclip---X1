@@ -1,0 +1,11 @@
+# Dependencies — restored by `npm ci` in CI, never committed.
+node_modules/
+
+# Local env / secrets — real values live in GitHub Actions repo secrets.
+.env
+.env.*
+
+# NOTE: data/seen_all.json, data/run_log.json and output/ are intentionally
+# NOT ignored. The de-dupe state must persist between weekly runs, and the
+# workflow commits it back after each run. Deleting/ignoring it would make
+# every run re-send every item as "new".

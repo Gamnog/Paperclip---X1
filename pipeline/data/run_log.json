@@ -1,0 +1,329 @@
+[
+  {
+    "startedAt": "2026-07-21T00:57:27.556Z",
+    "finishedAt": "2026-07-21T00:57:29.800Z",
+    "status": "ok",
+    "error": null,
+    "sourcesOk": 7,
+    "sourcesTotal": 7,
+    "sourceResults": [
+      {
+        "sourceId": "ns-sbirka",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "us-nalus",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "insolvence-justice",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "psp-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "senat-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "asis-feed",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "cnb-rss",
+        "ok": true,
+        "itemCount": 0
+      }
+    ],
+    "itemCount": 0,
+    "outPath": "C:\\Users\\tothj\\.paperclip\\instances\\default\\projects\\8b69bd0f-fd39-45ba-97af-f6a50309c9fa\\e9a65cdd-026a-489b-8bd2-d340ba39eb6b\\_default\\pipeline\\output\\digest_2026-07-21.md"
+  },
+  {
+    "startedAt": "2026-07-21T01:01:13.545Z",
+    "finishedAt": "2026-07-21T01:01:16.655Z",
+    "status": "ok",
+    "error": null,
+    "sourcesOk": 8,
+    "sourcesTotal": 8,
+    "sourceResults": [
+      {
+        "sourceId": "ns-sbirka",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "us-nalus",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "insolvence-justice",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "psp-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "senat-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "asis-feed",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "cnb-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "epravo-rss",
+        "ok": true,
+        "itemCount": 2
+      }
+    ],
+    "itemCount": 2,
+    "outPath": "C:\\Users\\tothj\\.paperclip\\instances\\default\\projects\\8b69bd0f-fd39-45ba-97af-f6a50309c9fa\\e9a65cdd-026a-489b-8bd2-d340ba39eb6b\\_default\\pipeline\\output\\digest_2026-07-21.md"
+  },
+  {
+    "startedAt": "2026-07-21T01:02:14.295Z",
+    "finishedAt": "2026-07-21T01:02:18.064Z",
+    "status": "ok",
+    "error": null,
+    "sourcesOk": 8,
+    "sourcesTotal": 8,
+    "sourceResults": [
+      {
+        "sourceId": "ns-sbirka",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "us-nalus",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "insolvence-justice",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "psp-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "senat-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "asis-feed",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "cnb-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "epravo-rss",
+        "ok": true,
+        "itemCount": 0
+      }
+    ],
+    "itemCount": 0,
+    "outPath": "C:\\Users\\tothj\\.paperclip\\instances\\default\\projects\\8b69bd0f-fd39-45ba-97af-f6a50309c9fa\\e9a65cdd-026a-489b-8bd2-d340ba39eb6b\\_default\\pipeline\\output\\digest_2026-07-21.md"
+  },
+  {
+    "startedAt": "2026-07-21T01:19:37.843Z",
+    "finishedAt": "2026-07-21T01:19:41.440Z",
+    "status": "ok",
+    "error": null,
+    "sourcesOk": 9,
+    "sourcesTotal": 9,
+    "sourceResults": [
+      {
+        "sourceId": "ns-sbirka",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "us-nalus",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "insolvence-justice",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "psp-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "senat-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "asis-feed",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "cnb-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "epravo-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "advokatni-denik-rss",
+        "ok": true,
+        "itemCount": 3
+      }
+    ],
+    "itemCount": 3,
+    "outPath": "C:\\Users\\tothj\\.paperclip\\instances\\default\\projects\\8b69bd0f-fd39-45ba-97af-f6a50309c9fa\\e9a65cdd-026a-489b-8bd2-d340ba39eb6b\\_default\\pipeline\\output\\digest_2026-07-21.md"
+  },
+  {
+    "startedAt": "2026-07-21T01:21:14.548Z",
+    "finishedAt": "2026-07-21T01:21:18.431Z",
+    "status": "ok",
+    "error": null,
+    "sourcesOk": 9,
+    "sourcesTotal": 9,
+    "sourceResults": [
+      {
+        "sourceId": "ns-sbirka",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "us-nalus",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "insolvence-justice",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "psp-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "senat-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "asis-feed",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "cnb-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "epravo-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "advokatni-denik-rss",
+        "ok": true,
+        "itemCount": 0
+      }
+    ],
+    "itemCount": 0,
+    "outPath": "C:\\Users\\tothj\\.paperclip\\instances\\default\\projects\\8b69bd0f-fd39-45ba-97af-f6a50309c9fa\\e9a65cdd-026a-489b-8bd2-d340ba39eb6b\\_default\\pipeline\\output\\digest_2026-07-21.md"
+  },
+  {
+    "startedAt": "2026-07-21T01:40:17.273Z",
+    "finishedAt": "2026-07-21T01:40:22.335Z",
+    "status": "ok",
+    "error": null,
+    "sourcesOk": 10,
+    "sourcesTotal": 10,
+    "sourceResults": [
+      {
+        "sourceId": "ns-sbirka",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "us-nalus",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "insolvence-justice",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "psp-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "senat-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "asis-feed",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "cnb-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "epravo-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "profipravo-rss",
+        "ok": true,
+        "itemCount": 4
+      },
+      {
+        "sourceId": "advokatni-denik-rss",
+        "ok": true,
+        "itemCount": 0
+      }
+    ],
+    "itemCount": 4,
+    "outPath": "C:\\Users\\tothj\\.paperclip\\instances\\default\\projects\\8b69bd0f-fd39-45ba-97af-f6a50309c9fa\\e9a65cdd-026a-489b-8bd2-d340ba39eb6b\\_default\\pipeline\\output\\digest_2026-07-21.md"
+  }
+]

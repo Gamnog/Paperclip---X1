@@ -1,0 +1,16 @@
+{
+  "name": "firezard-pilot-pipeline",
+  "version": "0.1.0",
+  "description": "Firezard legal-monitoring digest pipeline (FIR-17 pilot MVP)",
+  "main": "run.js",
+  "scripts": {
+    "start": "node run.js",
+    "scheduler": "node scheduler.js"
+  },
+  "dependencies": {
+    "nodemailer": "^6.10.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
