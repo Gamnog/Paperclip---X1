@@ -9,7 +9,7 @@
     "test": "node test/classify.test.js && node test/nss-sbirka-scrape.test.js"
   },
   "dependencies": {
-    "nodemailer": "^6.10.1"
+    "nodemailer": "^9.0.3"
   },
   "engines": {
     "node": ">=18"
