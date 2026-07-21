@@ -101,6 +101,54 @@ async function run() {
     assert.strictEqual(items[0].id, 'nss-sbirka-p1000');
   });
 
+  // FIR-25 rate-limit hardening: a full-archive backfill must NOT crash when the
+  // server throttles a listing page with HTTP 429 (that is exactly what killed
+  // the earlier run). It should skip the throttled page after exhausting retries,
+  // still seed the pages it could reach, and complete normally.
+  await t('backfill: a 429-throttled listing page is skipped, run still completes', async () => {
+    const cachePath2 = path.join(os.tmpdir(), `nss-cache-test429-${process.pid}.json`);
+    try { fs.unlinkSync(cachePath2); } catch {}
+
+    // Stub timers so withRetry's exponential backoff does not actually sleep.
+    const realSetTimeout = global.setTimeout;
+    global.setTimeout = (cb) => realSetTimeout(cb, 0);
+
+    // Page 1 lists p1000 (+ a pagination link to _page=2 so hardCap=2). Page 2
+    // always returns HTTP 429 -> exhausts retries -> must be skipped, not fatal.
+    const PAGE1 = `${LIST_HTML}\n<a href="/cz/vyhledavani?_page=2">2</a>`;
+    let p2Attempts = 0;
+    global.fetch = async (url) => {
+      if (url.includes('_page=2')) {
+        p2Attempts++;
+        return { ok: false, status: 429, headers: { get: () => null }, text: async () => '' };
+      }
+      if (url.includes('/cz/vyhledavani')) {
+        return { ok: true, status: 200, text: async () => PAGE1 };
+      }
+      const m = url.match(/\.p(\d+)\.html/);
+      if (m) return { ok: true, status: 200, text: async () => DETAIL[m[1]] };
+      throw new Error(`unexpected fetch: ${url}`);
+    };
+
+    try {
+      const items = await fetchItems({
+        sourceId: 'nss-sbirka',
+        sourceName: 'NSS Sbírka',
+        fullBackfill: true,
+        requestDelayMs: 0,
+        classifier: stubClassifier,
+        cachePath: cachePath2,
+      });
+      assert.strictEqual(p2Attempts, 5, `page 2 should be retried 5x before skip, got ${p2Attempts}`);
+      // Page 1's relevant decision (p1000) still surfaces despite page 2 dying.
+      assert.strictEqual(items.length, 1, `expected 1 item from reachable pages, got ${items.length}`);
+      assert.strictEqual(items[0].id, 'nss-sbirka-p1000');
+    } finally {
+      global.setTimeout = realSetTimeout;
+      try { fs.unlinkSync(cachePath2); } catch {}
+    }
+  });
+
   try { fs.unlinkSync(cachePath); } catch {}
   console.log(`\nnss-sbirka-scrape.test.js: ${passed} tests passed`);
 }

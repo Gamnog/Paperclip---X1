@@ -66,7 +66,18 @@ const MAX_CACHE_TEXT_CHARS = 6000;
 // via config.maxPages. 5 pages ≈ 50 newest decisions — comfortably more than a
 // weekly delta for this low-volume, editorially-curated collection.
 const DEFAULT_MAX_PAGES = 5;
+// Inter-request pacing. The weekly delta is ~50 fetches so a small gap is fine,
+// but the one-time full-archive backfill fires thousands of sequential requests
+// at a court server that rate-limits anonymous crawlers (HTTP 429 — see FIR-25):
+// crawling at 300ms tripped the limiter and the whole run died. Pace the backfill
+// far more conservatively (override with env NSS_SBIRKA_REQUEST_DELAY_MS).
 const DEFAULT_REQUEST_DELAY_MS = 300;
+const BACKFILL_REQUEST_DELAY_MS = 1200;
+// Stage-1 circuit breaker: if the server hard-blocks this many pages in a row,
+// stop paginating so the run ends and commits its progress (the incremental
+// cache) instead of grinding through hundreds of failing pages; a later re-run
+// resumes from the committed cache.
+const MAX_CONSECUTIVE_PAGE_FAILURES = 5;
 
 // _sort=datum*desc is required: the endpoint's default sort ("sort*desc",
 // relevance) is NOT stable for an empty query — live testing (FIR-32) showed
@@ -129,23 +140,57 @@ function parseCzDate(s) {
   return new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d))).toISOString();
 }
 
+// Retryable statuses: rate-limit (429) and 5xx server errors are transient. A
+// deliberate 4xx (403/404) will not change on retry, so we give up immediately
+// rather than burning backoff on it (a dead detail page falls back to snippet).
+function isRetryableStatus(status) {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
+// Parse a Retry-After header (delta-seconds or HTTP-date) into ms. Guards a
+// missing/mock `headers` object. Returns null when absent/unparseable.
+function parseRetryAfterMs(res) {
+  const raw = res && res.headers && typeof res.headers.get === 'function' ? res.headers.get('retry-after') : null;
+  if (!raw) return null;
+  const secs = Number(raw);
+  if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+  const when = Date.parse(raw);
+  return Number.isFinite(when) ? Math.max(0, when - Date.now()) : null;
+}
+
 async function fetchHtml(url) {
   return withRetry(
     async () => {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 25000);
+      const timer = setTimeout(() => controller.abort(), 30000);
       try {
         const res = await fetch(url, {
           signal: controller.signal,
           headers: { 'User-Agent': BROWSER_UA },
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
+        if (!res.ok) {
+          const err = new Error(`HTTP ${res.status} from ${url}`);
+          err.status = res.status;
+          const retryAfterMs = parseRetryAfterMs(res);
+          if (retryAfterMs != null) err.retryAfterMs = retryAfterMs;
+          throw err;
+        }
         return await res.text();
       } finally {
         clearTimeout(timer);
       }
     },
-    { label: `nss-sbirka ${url}` }
+    {
+      label: `nss-sbirka ${url}`,
+      // 429-tolerant: 5 tries with exponential backoff (2s,4s,8s,16s ≈ 30s of
+      // cool-down), honouring a server Retry-After when present. Network/timeout
+      // errors (no .status) are retried; a deliberate 4xx is not.
+      attempts: 5,
+      delayMs: 2000,
+      factor: 2,
+      maxDelayMs: 60000,
+      shouldRetry: (err) => err.status == null || isRetryableStatus(err.status),
+    }
   );
 }
 
@@ -256,19 +301,52 @@ async function fetchItems({
   maxPages = DEFAULT_MAX_PAGES,
   fullBackfill = process.env.NSS_SBIRKA_FULL_BACKFILL === '1',
   seenHasId = () => false,
-  requestDelayMs = DEFAULT_REQUEST_DELAY_MS,
+  requestDelayMs,
   classifier,
   cachePath = DEFAULT_CACHE_PATH,
 } = {}) {
   const clf = classifier || makeClassifier({ keywords });
+
+  // Resolve inter-request pacing: explicit arg (tests pass 0) wins; else an env
+  // override; else a conservative default that is much gentler for the heavy
+  // full-archive backfill than for the tiny weekly delta.
+  const delayMs = requestDelayMs != null
+    ? requestDelayMs
+    : (Number(process.env.NSS_SBIRKA_REQUEST_DELAY_MS) || (fullBackfill ? BACKFILL_REQUEST_DELAY_MS : DEFAULT_REQUEST_DELAY_MS));
 
   // Stage 1: paginate the listing and collect every UNSEEN decision. No
   // keyword pre-filter — the classifier decides relevance later.
   const candidates = new Map(); // pid -> listing record
 
   let page = 1;
+  // For a full backfill the last page is resolved once, from page 1's pagination
+  // links (a page that later fails to fetch has no html to re-derive it from).
+  let hardCap = fullBackfill ? Infinity : maxPages;
+  let consecutiveFailures = 0;
   for (;;) {
-    const html = await fetchHtml(searchPageUrl(page));
+    let html;
+    try {
+      html = await fetchHtml(searchPageUrl(page));
+      consecutiveFailures = 0;
+    } catch (err) {
+      // Weekly runs are tiny and must be reliable, so surface the failure. Page
+      // 1 is fatal either way (we can't even size the archive). But for the
+      // heavy full backfill a single throttled page must NOT sink the whole
+      // seeding run: skip it — a later re-run re-walks from page 1 and retries
+      // it — and stop entirely if the server hard-blocks a long stretch, so the
+      // run ends and commits its progress rather than grinding through failures.
+      if (!fullBackfill || page === 1) throw err;
+      console.warn(`[nss-sbirka] stage-1 page ${page} failed after retries: ${err.message} — skipping`);
+      if (++consecutiveFailures >= MAX_CONSECUTIVE_PAGE_FAILURES) {
+        console.warn(`[nss-sbirka] ${consecutiveFailures} consecutive stage-1 page failures — stopping pagination early; a re-run resumes from the committed cache`);
+        break;
+      }
+      if (page >= hardCap) break;
+      page += 1;
+      await sleep(delayMs);
+      continue;
+    }
+
     const entries = parseListPage(html);
 
     if (entries.length === 0) {
@@ -286,11 +364,12 @@ async function fetchItems({
       candidates.set(e.pid, e);
     }
 
-    const hardCap = fullBackfill ? parseMaxPage(html) : maxPages;
+    // Resolve the backfill's last page once, from the first page's links.
+    if (fullBackfill && !Number.isFinite(hardCap)) hardCap = parseMaxPage(html);
     if (page >= hardCap) break;
 
     page += 1;
-    await sleep(requestDelayMs);
+    await sleep(delayMs);
   }
 
   // Stage 2: detail-fetch every candidate not already cached; extract & cache
@@ -303,11 +382,15 @@ async function fetchItems({
     let detail;
     try {
       detail = parseDecisionDetail(await fetchHtml(e.url));
-      await sleep(requestDelayMs);
+      await sleep(delayMs);
     } catch (err) {
-      // One unreachable detail page must not sink the source; fall back to the
-      // listing-level headnote (title + snippet).
-      detail = { title: e.title, text: e.snippet };
+      // Detail page unreachable (throttled / genuinely gone): classify on the
+      // listing snippet for THIS run (stage 3 falls back to e.snippet), but do
+      // NOT cache — caching the degraded snippet as the body would make every
+      // re-run skip the real detail fetch, permanently poisoning the cache.
+      // Leaving it uncached lets a later re-run retry the real body.
+      console.warn(`[nss-sbirka] detail fetch failed for p${e.pid}: ${err.message} — using snippet, not caching`);
+      continue;
     }
     cache[e.pid] = {
       url: e.url,
@@ -339,7 +422,7 @@ async function fetchItems({
       console.warn(`[nss-sbirka] classify threw for p${e.pid}: ${err.message} — skipping`);
       continue;
     }
-    await sleep(requestDelayMs);
+    await sleep(delayMs);
     if (!verdict || !verdict.relevant) continue;
 
     const summaryText = text || title;
