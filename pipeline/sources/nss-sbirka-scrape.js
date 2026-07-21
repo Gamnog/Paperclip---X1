@@ -14,10 +14,20 @@
 //
 // Two-stage scrape:
 //   Stage 1 — paginate /cz/vyhledavani search results (newest-first) to
-//     collect decision ids + detail URLs. Because results are newest-first,
-//     an incremental (weekly-monitoring) run can stop as soon as it hits a
-//     page whose decisions are all already-seen, instead of walking the
-//     entire ~474-page archive every run.
+//     collect decision ids + detail URLs. The incremental (weekly-monitoring)
+//     bound that keeps a normal run from walking the entire ~474-page archive
+//     is `maxPages` (default 5 ≈ the 50 most-recent decisions) — comfortably
+//     more headroom than a weekly cadence needs for this low-volume Sbírka.
+//     There is ALSO a page-level short-circuit (stop once a page's decisions
+//     are all already-seen), but note it rarely fires in practice: the
+//     pipeline seen-store only records decisions we actually *surfaced*
+//     (i.e. keyword-matched ones), not every decision we crawled, and most
+//     NSS decisions don't match the insolvency keywords — so a page is almost
+//     never "fully seen". Treat `maxPages` as the real incremental bound; the
+//     short-circuit is a harmless best-effort optimization on top. (A genuinely
+//     effective early-stop would need a persisted high-water crawl cursor —
+//     deliberately not added: overkill for a Tier-B source maxPages already
+//     bounds to ~14s/run.)
 //   Stage 2 — fetch each detail page and extract headnote ("právní věta"),
 //     cited statutes ("předpisy") and legal thesis. The search-results pages
 //     do NOT carry full text, so keyword filtering MUST run against stage-2
@@ -155,11 +165,13 @@ function matchesKeywords(haystack, keywords) {
 // Contract matches rss-generic.fetchItems: returns
 // { id, title, url, pubDate, summary, sourceId, sourceName }[]
 //
-// options.seenHasId: (id) => boolean — lets stage 1 stop paginating once a
-// page's decisions are all already in the pipeline's seen-store, instead of
-// walking the full archive every run. Passed in from run.js; defaults to
-// "nothing seen" so the module still works standalone (e.g. a one-off backfill
-// run outside the orchestrator).
+// options.seenHasId: (id) => boolean — checked against the pipeline seen-store.
+// Primary use: skip the stage-2 detail fetch for decisions we've already
+// surfaced (see below). It also feeds the page-level early-stop, but — as noted
+// in the module header — that rarely triggers, because the seen-store only holds
+// keyword-matched decisions, not every crawled one. Passed in from run.js;
+// defaults to "nothing seen" so the module still works standalone (e.g. a one-off
+// backfill run outside the orchestrator).
 // options.fullBackfill: true (or env NSS_SBIRKA_FULL_BACKFILL=1) walks the
 // entire archive up to the dynamically-parsed last page — intended for a
 // one-time initial crawl only, NOT for weekly monitoring.
@@ -193,6 +205,8 @@ async function fetchItems({
     }
 
     const hardCap = fullBackfill ? parseMaxPage(html) : maxPages;
+    // Best-effort short-circuit — rarely fires (seen-store only holds surfaced,
+    // keyword-matched decisions), so `maxPages`/hardCap is the real bound.
     const pageFullySeen = links.every((l) => seenHasId(decisionId(l.pid)));
     if (!fullBackfill && pageFullySeen) break; // caught up with a prior run
     if (page >= hardCap) break;
