@@ -1,0 +1,58 @@
+# Firezard weekly legal digest — GitHub Actions scheduled run.
+#
+# This is the ACTIVE workflow (promoted from the FIR-23 draft, FIR-28).
+# It only actually runs once the pipeline/ directory is pushed to a GitHub
+# repo and the secrets below are configured — see DEPLOY.md for the exact
+# steps (repo create + secrets are an account-holder action).
+#
+# Cadence: Monday 07:30 CEST (summer) / 06:30 CET (winter). GitHub Actions
+# cron is UTC-only and not DST-aware, so we keep ONE cron and accept a 1-hour
+# drift twice a year — irrelevant for a weekly legal digest. Do NOT add a
+# second cron entry to "fix" DST: two entries would fire two runs on the same
+# Monday and double-send.
+
+name: Weekly Firezard digest
+
+on:
+  schedule:
+    - cron: '30 5 * * 1'   # Monday 05:30 UTC = 07:30 CEST / 06:30 CET
+  workflow_dispatch: {}     # manual "Run workflow" button in the Actions tab
+
+# Needed so the commit-back step can persist de-dupe state between runs.
+permissions:
+  contents: write
+
+# A slow run must never overlap the next week's run.
+concurrency:
+  group: weekly-digest
+  cancel-in-progress: false
+
+jobs:
+  run-digest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pipeline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - name: Run pipeline + deliver digests
+        run: node scheduler.js --once   # single pass, then exit
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          DIGEST_FROM: ${{ secrets.DIGEST_FROM }}
+          # Optional: enables AI summarization. Absent => extractive fallback.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Persist de-dupe state, run log, and digest output
+        run: |
+          git config user.name "firezard-bot"
+          git config user.email "bot@firezard.local"
+          git add data/seen_all.json data/run_log.json output/
+          git diff --cached --quiet || git commit -m "chore: weekly digest run $(date -u +%F)"
+          git push
