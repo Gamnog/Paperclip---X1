@@ -325,5 +325,67 @@
     ],
     "itemCount": 4,
     "outPath": "C:\\Users\\tothj\\.paperclip\\instances\\default\\projects\\8b69bd0f-fd39-45ba-97af-f6a50309c9fa\\e9a65cdd-026a-489b-8bd2-d340ba39eb6b\\_default\\pipeline\\output\\digest_2026-07-21.md"
+  },
+  {
+    "startedAt": "2026-07-21T10:43:39.525Z",
+    "finishedAt": "2026-07-21T10:43:50.185Z",
+    "status": "ok",
+    "error": null,
+    "sourcesOk": 10,
+    "sourcesTotal": 10,
+    "sourceResults": [
+      {
+        "sourceId": "ns-sbirka",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "us-nalus",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "insolvence-justice",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "psp-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "senat-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "asis-feed",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "cnb-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "epravo-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "profipravo-rss",
+        "ok": true,
+        "itemCount": 0
+      },
+      {
+        "sourceId": "advokatni-denik-rss",
+        "ok": true,
+        "itemCount": 0
+      }
+    ],
+    "itemCount": 0,
+    "outPath": "/home/runner/work/Paperclip---X1/Paperclip---X1/pipeline/output/digest_2026-07-21.md"
   }
 ]
