@@ -19,7 +19,13 @@ function stripHtml(s) {
     .trim();
 }
 
-async function fetchFeedWithEncoding(url, encoding) {
+const DEFAULT_UA = 'FirezardMonitor/0.1 (legal-digest pilot; contact: founder)';
+// Some sources (e.g. zakonyprolidi.cz) 403 any non-browser User-Agent. Such
+// sources set config.userAgent to a browser UA so the fetch is not bot-blocked.
+const BROWSER_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
+
+async function fetchFeedWithEncoding(url, encoding, userAgent) {
   return withRetry(
     async () => {
       const controller = new AbortController();
@@ -27,7 +33,7 @@ async function fetchFeedWithEncoding(url, encoding) {
       try {
         const res = await fetch(url, {
           signal: controller.signal,
-          headers: { 'User-Agent': 'FirezardMonitor/0.1 (legal-digest pilot; contact: founder)' },
+          headers: { 'User-Agent': userAgent || DEFAULT_UA },
         });
         if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
         if (!encoding || encoding === 'utf-8') return await res.text();
@@ -62,8 +68,8 @@ function isWithinMaxAgeDays(pubDateStr, maxAgeDays) {
 
 // Returns items as: { id, title, url, pubDate, summary, sourceId, sourceName }
 // maxAgeDays: if set, drops items older than N days (important for archive-type feeds like Senát)
-async function fetchItems({ feedUrl, keywords = [], encoding = 'utf-8', maxAgeDays, sourceId, sourceName }) {
-  const xml = await fetchFeedWithEncoding(feedUrl, encoding);
+async function fetchItems({ feedUrl, keywords = [], encoding = 'utf-8', maxAgeDays, userAgent, sourceId, sourceName }) {
+  const xml = await fetchFeedWithEncoding(feedUrl, encoding, userAgent);
   const parsed = parseFeedItems(xml);
   const relevant = parsed
     .filter((item) => isWithinMaxAgeDays(item.pubDate, maxAgeDays))
@@ -82,4 +88,4 @@ async function fetchItems({ feedUrl, keywords = [], encoding = 'utf-8', maxAgeDa
   });
 }
 
-module.exports = { fetchItems };
+module.exports = { fetchItems, BROWSER_UA };

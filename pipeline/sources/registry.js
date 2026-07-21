@@ -4,6 +4,7 @@
 // Item shape: { id, title, url, pubDate, summary, sourceId, sourceName, relevanceTags }
 
 const path = require('path');
+const { BROWSER_UA } = require('./rss-generic');
 const r = (m) => path.join(__dirname, m);
 
 const SOURCES = [
@@ -120,21 +121,24 @@ const SOURCES = [
     tier: 'B',
     module: r('./pendingStub.js'),
     config: {
-      notes: 'Re-confirmed 2026-07-21: nssoud.cz/rss and /feed both redirect to www.nssoud.cz equivalents which 404; sbirka.nssoud.cz/rss also 404s; no RSS link found on the tiskové zprávy (press releases) page or in page source. This is not a bot-block — the site genuinely appears to have no RSS feed. NSS decisions can matter for insolvency-adjacent administrative disputes (e.g. tax claims in proceedings).',
-      action: 'CEO-assigned per FIR-23 interaction: confirm in a browser whether NSS offers any feed/export (check judikatura search UI at vyhledavac.nssoud.cz for an export/subscribe option) or decide to drop this source. Tracked together with zakonyprolidi.cz in the follow-up ticket.',
+      notes: 'DROPPED FIR-25 (2026-07-21): confirmed NSS has no RSS feed. nssoud.cz/rss 301-redirects to www.nssoud.cz/rss, which returns HTTP 404 but serves the full 70KB TYPO3 site page (title "Nejvyšší správní soud — Oficiální webové stránky") instead of a blank error — a soft-404. This is why a browser makes it look like the URL "exists and is accessible": the page renders normally, but the response is 404 HTML, not an RSS/XML feed (Content-Type text/html, no <rss>/<feed>). sbirka.nssoud.cz/rss does not exist. The judikatura search UI at vyhledavac.nssoud.cz (reachable, HTTP 200) offers only a per-query "Export" (CSV/PDF), not a subscribable feed. No automated-feed path exists without building a custom scraper against the search UI — out of scope for the pilot.',
+      action: 'None — dropped from pilot scope. If NSS administrative case law (e.g. tax claims in insolvency proceedings) is later flagged as a gap, revisit as a custom scraper against vyhledavac.nssoud.cz, not an RSS source.',
     },
-    status: 'pending_registration',
+    status: 'dropped',
   },
   {
     id: 'zakonyprolidi-rss',
-    name: 'zakonyprolidi.cz — newly promulgated legislation',
+    name: 'zakonyprolidi.cz — newly promulgated legislation (nové vyhlášené předpisy)',
     tier: 'B',
-    module: r('./pendingStub.js'),
+    module: r('./rss-generic.js'),
     config: {
-      notes: 'zakonyprolidi.cz/rss confirms an RSS channels page exists, but it 403’d on automated fetch (likely bot-blocking) — could not confirm the exact channel URL for "nové vyhlášené předpisy".',
-      action: 'Open zakonyprolidi.cz/rss in a browser, copy the exact channel URL for newly-promulgated regulations, and confirm it still resolves from the deployment host before wiring (module: rss-generic.js).',
+      feedUrl: 'https://www.zakonyprolidi.cz/cs/nove-predpisy.rss',
+      keywords: ['insolven', 'reorganizac', 'restrukturalizac', 'konkurs', 'oddlužen', 'věřitel', 'úpadek', 'odpůrčí'],
+      encoding: 'utf-8',
+      userAgent: BROWSER_UA,  // site 403s any non-browser User-Agent (bot-block); see FIR-25
     },
-    status: 'pending_registration',
+    status: 'active',
+    notes: 'Resolved FIR-25 (2026-07-21): the "nové vyhlášené předpisy" channel from zakonyprolidi.cz/rss is https://www.zakonyprolidi.cz/cs/nove-predpisy.rss. Verified live — valid RSS 2.0, UTF-8, current Sbírka zákonů items. The 403 on the earlier automated fetch was User-Agent bot-blocking: with a browser UA the feed returns 200, so config.userAgent is set to a browser UA. This channel lists ALL newly promulgated Sbírka zákonů predpisy, so the insolvency keyword filter is REQUIRED to avoid flooding the digest with unrelated legislation.',
   },
   {
     id: 'eurlex-rss',
