@@ -1,0 +1,48 @@
+# One-time NSS Sbírka history backfill (FIR-25) — manual trigger only.
+#
+# The weekly digest only scans the newest ~50 NSS decisions, which rarely
+# include an insolvency ruling, so NSS never seeded any history. This workflow
+# walks the full Sbírka archive once, seeds every insolvency-relevant decision
+# into data/seen_all.json, and commits an evidence report to output/. It does
+# NOT email anyone — it is pure seeding, safe to re-run.
+#
+# Trigger: Actions tab -> "NSS Sbírka backfill (one-time)" -> Run workflow,
+# or:  gh workflow run nss-backfill.yml
+#
+# Run this ONCE. After it seeds history, the normal weekly-digest workflow
+# surfaces only new NSS decisions.
+
+name: NSS Sbírka backfill (one-time)
+
+on:
+  workflow_dispatch: {}
+
+# Needed so the commit-back step can persist the seeded de-dupe state.
+permissions:
+  contents: write
+
+concurrency:
+  group: nss-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pipeline
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - name: Run NSS full-archive backfill (seed history, no email)
+        run: node scripts/nss-backfill.js
+      - name: Persist seeded de-dupe state + backfill report
+        run: |
+          git config user.name "firezard-bot"
+          git config user.email "bot@firezard.local"
+          git add data/seen_all.json output/
+          git diff --cached --quiet || git commit -m "chore(FIR-25): NSS Sbírka one-time history backfill $(date -u +%F)"
+          git push
