@@ -67,9 +67,13 @@ async function main() {
   fs.mkdirSync(outDir, { recursive: true });
   const outPath = path.join(outDir, `nss_backfill_${stamp}.md`);
 
+  const classifierMode = process.env.ANTHROPIC_API_KEY
+    ? 'Claude classifier (claude-haiku-4-5-20251001) over full decision text'
+    : 'OFFLINE KEYWORD FALLBACK (ANTHROPIC_API_KEY not set — relevance is only approximate; re-run with the key set)';
+
   let md = `# NSS Sbírka backfill — insolvency & restructuring (${stamp})\n\n`;
   md += `Source: ${src.name}\n`;
-  md += `Keyword filter: ${(src.config.keywords || []).join(', ')}\n\n`;
+  md += `Relevance filter: ${classifierMode}\n\n`;
   md += `Found and seeded **${seeded.length}** insolvency-relevant decision(s) from the full Sbírka archive.\n`;
   md += `These are marked seen; the weekly digest will surface only NEW NSS decisions from here on.\n\n---\n\n`;
   for (const it of seeded) {

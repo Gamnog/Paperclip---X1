@@ -5,7 +5,8 @@
   "main": "run.js",
   "scripts": {
     "start": "node run.js",
-    "scheduler": "node scheduler.js"
+    "scheduler": "node scheduler.js",
+    "test": "node test/classify.test.js && node test/nss-sbirka-scrape.test.js"
   },
   "dependencies": {
     "nodemailer": "^6.10.1"

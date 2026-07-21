@@ -39,10 +39,20 @@ jobs:
       - run: npm ci
       - name: Run NSS full-archive backfill (seed history, no email)
         run: node scripts/nss-backfill.js
-      - name: Persist seeded de-dupe state + backfill report
+        env:
+          # REQUIRED: enables the Claude relevance classifier. Without it the
+          # backfill silently falls back to the offline keyword heuristic and
+          # defeats the point of FIR-33 (classifier over full text).
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      - name: Persist seeded de-dupe state, text cache + backfill report
+        # always(): a throttled / timed-out crawl still commits its incremental
+        # text cache so a re-run resumes instead of restarting the ~4740-page
+        # crawl. (seen_all.json is only written on full completion; the cache is
+        # written incrementally.)
+        if: always()
         run: |
           git config user.name "firezard-bot"
           git config user.email "bot@firezard.local"
-          git add data/seen_all.json output/
-          git diff --cached --quiet || git commit -m "chore(FIR-25): NSS Sbírka one-time history backfill $(date -u +%F)"
+          git add data/ output/   # seen_all.json + incremental text cache + report
+          git diff --cached --quiet || git commit -m "chore(FIR-33): NSS Sbírka backfill (classifier) $(date -u +%F)"
           git push

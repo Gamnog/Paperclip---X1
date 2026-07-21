@@ -5,30 +5,30 @@
 // Sbírka itself IS a clean, low-volume, editorially-curated collection of the
 // most significant administrative-court decisions, each with a stable URL
 // carrying a monotonic id (.../<slug>.p<NNNN>.html). We scrape the full
-// searchable archive at /cz/vyhledavani, keyword-filter, and hand the pipeline
-// the same Item shape the RSS sources produce. The pipeline seen-store dedupes
-// across runs (id = pNNNN), so each decision surfaces exactly once.
+// searchable archive at /cz/vyhledavani and hand the pipeline the same Item
+// shape the RSS sources produce. The pipeline seen-store dedupes across runs
+// (id = pNNNN), so each decision surfaces exactly once.
 //
-// Two-stage scrape (FIR-25, rev 3 — pre-filtered):
-//   Stage 1 — paginate /cz/vyhledavani search results (date-descending). Each
-//     result row carries, IN THE LIST HTML, the decision's editorial headnote
-//     TITLE, a content SNIPPET (the "právní věta", which opens with the cited
-//     statutes line — e.g. "k § ... zákona č. 182/2006 Sb."), and the publish
-//     DATE. We parse those structured fields and keyword-filter on
-//     title+snippet HERE, at stage 1. This is the key change over the earlier
-//     FIR-32 version, which fetched EVERY decision's detail page just to filter
-//     (~4740 fetches for a full-archive pass) — that made the one-time backfill
-//     so slow/throttle-prone it was never actually run, so NSS surfaced zero
-//     decisions in the digest (the board push-back that reopened FIR-25).
-//     Filtering on the headnote is safe for THIS source because the curated
-//     Sbírka snippet reproduces the cited-statute line, where insolvency
-//     relevance (182/2006 Sb. et al.) reliably appears — unlike a raw docket,
-//     where relevance could hide in body text only.
-//   Stage 2 — for decisions that PASS the stage-1 filter only, fetch the detail
-//     page and extract the full headnote ("právní věta") + cited statutes for a
-//     richer digest summary. Non-candidates are never detail-fetched, so a full
-//     474-page backfill costs ~474 list fetches + a few dozen detail fetches
-//     instead of ~4740 — gentle enough to survive the site's rate-limiting.
+// Three-stage scrape (FIR-33, rev 4 — classifier, NO keyword pre-filter):
+//   Stage 1 — paginate /cz/vyhledavani search results (date-descending) and
+//     collect EVERY unseen decision. Per the CEO's 2026-07-21 directive there
+//     is no keyword pre-filter: a keyword gate on the headnote misses decisions
+//     whose insolvency relevance lives in the body only, so relevance is
+//     decided later, by the classifier, over the full text.
+//   Stage 2 — detail-fetch every candidate, extract the full ruling body from
+//     <div class="jud">, and cache it (data/nss_sbirka_cache.json, keyed by
+//     pid). Cached pids are never re-fetched; the cache is flushed
+//     incrementally so a throttled/interrupted full-archive backfill resumes
+//     from committed progress instead of restarting the ~4740-page crawl.
+//   Stage 3 — classify each candidate's full text via lib/classify.js (Claude
+//     Haiku when ANTHROPIC_API_KEY is set, else an offline keyword fallback).
+//     Only decisions marked relevant are returned.
+//
+// Cost/throttle note: fetching every decision's detail page is heavier than the
+// FIR-32 headnote pre-filter it replaces (this is the tradeoff the CEO chose:
+// recall over fetch-count). For the WEEKLY run this is bounded (newest ~50). For
+// the one-time full backfill it is ~4740 detail fetches + ~4740 Haiku calls; the
+// incremental cache makes that safely resumable across CI re-runs.
 //
 // Incremental bound: a normal (weekly) run stops after `maxPages` search-result
 // pages (default 5 ≈ the 50 most-recent decisions) — ample headroom for a weekly
@@ -41,11 +41,26 @@
 // insolvency/restructuring specialization is secondary — mainly tax and other
 // public-law claims asserted within insolvency proceedings.
 
+const path = require('path');
+const fs = require('fs');
 const { BROWSER_UA } = require('./rss-generic');
 const { withRetry } = require('../lib/retry');
+const { makeClassifier } = require('../lib/classify');
 
 const BASE = 'https://sbirka.nssoud.cz';
 const SEARCH_URL = `${BASE}/cz/vyhledavani`;
+
+// Persisted text cache so a run (esp. the one-time full backfill) never
+// re-fetches a decision detail page it already scraped: keyed by pid ->
+// { url, title, pubDate, text, scrapedAt }. Saved incrementally so an
+// interrupted/throttled backfill resumes from committed progress on re-run.
+const DEFAULT_CACHE_PATH = path.join(__dirname, '..', 'data', 'nss_sbirka_cache.json');
+const CACHE_SAVE_EVERY = 25; // flush after this many new detail fetches
+
+// Bound the cached body text: the classifier and the digest summary each need
+// only a head slice, and committing full rulings for the whole archive would
+// bloat the repo. Enough to preserve the relevance signal.
+const MAX_CACHE_TEXT_CHARS = 6000;
 
 // Weekly-monitoring default: stop after this many search-result pages. Override
 // via config.maxPages. 5 pages ≈ 50 newest decisions — comfortably more than a
@@ -69,6 +84,25 @@ function decisionId(pid) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function loadCache(cachePath) {
+  try {
+    return JSON.parse(fs.readFileSync(cachePath, 'utf8')) || {};
+  } catch {
+    return {}; // missing/corrupt cache -> start fresh
+  }
+}
+
+function saveCache(cachePath, cache) {
+  try {
+    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+    fs.writeFileSync(cachePath, JSON.stringify(cache, null, 0), 'utf8');
+  } catch (err) {
+    // Cache is an optimization, not correctness — never let a write failure
+    // sink the whole scrape.
+    console.warn(`[nss-sbirka] cache write failed: ${err.message}`);
+  }
 }
 
 function stripHtml(s) {
@@ -190,22 +224,31 @@ function parseDecisionDetail(html) {
   return { title, text: judText };
 }
 
-function matchesKeywords(haystack, keywords) {
-  if (!keywords || keywords.length === 0) return true;
-  const hay = (haystack || '').toLowerCase();
-  return keywords.some((kw) => hay.includes(kw.toLowerCase()));
-}
-
 // Contract matches rss-generic.fetchItems: returns
 // { id, title, url, pubDate, summary, sourceId, sourceName }[]
 //
-// options.seenHasId: (id) => boolean — checked against the pipeline seen-store.
-// Used to skip decisions already surfaced in a prior digest (skips the stage-2
-// detail fetch too). Passed in from run.js; defaults to "nothing seen" so the
-// module still works standalone (e.g. a one-off backfill outside the orchestrator).
+// Three stages (FIR-33, rev 4 — classifier, no keyword pre-filter):
+//   Stage 1 — paginate the listing and collect EVERY unseen decision. There is
+//     NO keyword pre-filter (the CEO's 2026-07-21 directive): a keyword gate on
+//     the headnote misses decisions whose insolvency relevance lives in the
+//     body only, so every unseen decision becomes a candidate.
+//   Stage 2 — detail-fetch each candidate, extract the full ruling body from
+//     <div class="jud">, and cache it (data/nss_sbirka_cache.json, keyed by
+//     pid). Cached pids are NOT re-fetched, so a re-run / resumed backfill is
+//     cheap, and the cache is flushed incrementally so an interrupted backfill
+//     keeps its progress.
+//   Stage 3 — classify each candidate's full text via the injectable
+//     `classifier` (defaults to makeClassifier from lib/classify.js: Claude
+//     Haiku when ANTHROPIC_API_KEY is set, else the offline keyword heuristic).
+//     Only decisions the classifier marks relevant are returned.
+//
+// options.seenHasId: (id) => boolean — checked against the pipeline seen-store;
+//   already-surfaced decisions skip the detail fetch AND classification.
 // options.fullBackfill: true (or env NSS_SBIRKA_FULL_BACKFILL=1) walks the
-// entire archive up to the dynamically-parsed last page — intended for the
-// one-time initial crawl only, NOT for weekly monitoring.
+//   entire archive up to the dynamically-parsed last page — one-time seeding
+//   only, NOT weekly monitoring.
+// options.classifier: injectable { classify(item)->{relevant} } for tests.
+// options.cachePath: override the text-cache location (tests).
 async function fetchItems({
   keywords = [],
   sourceId,
@@ -214,10 +257,14 @@ async function fetchItems({
   fullBackfill = process.env.NSS_SBIRKA_FULL_BACKFILL === '1',
   seenHasId = () => false,
   requestDelayMs = DEFAULT_REQUEST_DELAY_MS,
+  classifier,
+  cachePath = DEFAULT_CACHE_PATH,
 } = {}) {
-  // Stage 1: paginate the listing and keyword-filter on the headnote
-  // (title + snippet) as we go. Only candidates are kept for a stage-2 fetch.
-  const candidates = new Map(); // pid -> listing record (already keyword-matched)
+  const clf = classifier || makeClassifier({ keywords });
+
+  // Stage 1: paginate the listing and collect every UNSEEN decision. No
+  // keyword pre-filter — the classifier decides relevance later.
+  const candidates = new Map(); // pid -> listing record
 
   let page = 1;
   for (;;) {
@@ -236,8 +283,7 @@ async function fetchItems({
     for (const e of entries) {
       if (candidates.has(e.pid)) continue;
       if (seenHasId(decisionId(e.pid))) continue; // already surfaced in a prior digest
-      const listHay = `${e.title} ${e.snippet}`;
-      if (matchesKeywords(listHay, keywords)) candidates.set(e.pid, e);
+      candidates.set(e.pid, e);
     }
 
     const hardCap = fullBackfill ? parseMaxPage(html) : maxPages;
@@ -247,27 +293,63 @@ async function fetchItems({
     await sleep(requestDelayMs);
   }
 
-  // Stage 2: enrich each candidate from its detail page for a better summary.
-  const items = [];
+  // Stage 2: detail-fetch every candidate not already cached; extract & cache
+  // the full ruling body. Flush the cache incrementally so a throttled/timed-out
+  // backfill resumes from committed progress.
+  const cache = loadCache(cachePath);
+  let fetchedSinceFlush = 0;
   for (const e of candidates.values()) {
+    if (cache[e.pid] && typeof cache[e.pid].text === 'string') continue; // already scraped
     let detail;
     try {
       detail = parseDecisionDetail(await fetchHtml(e.url));
       await sleep(requestDelayMs);
     } catch (err) {
       // One unreachable detail page must not sink the source; fall back to the
-      // listing-level headnote (title + snippet), which already matched.
+      // listing-level headnote (title + snippet).
       detail = { title: e.title, text: e.snippet };
     }
+    cache[e.pid] = {
+      url: e.url,
+      title: detail.title || e.title || '',
+      pubDate: e.pubDate,
+      text: String(detail.text || e.snippet || '').slice(0, MAX_CACHE_TEXT_CHARS),
+      scrapedAt: new Date().toISOString(),
+    };
+    if (++fetchedSinceFlush >= CACHE_SAVE_EVERY) {
+      saveCache(cachePath, cache);
+      fetchedSinceFlush = 0;
+    }
+  }
+  if (fetchedSinceFlush > 0) saveCache(cachePath, cache);
 
-    const summaryText = detail.text || e.snippet || detail.title || e.title;
+  // Stage 3: classify each candidate's full text; keep only the relevant ones.
+  const items = [];
+  for (const e of candidates.values()) {
+    const c = cache[e.pid] || {};
+    const title = c.title || e.title || `NSS rozhodnutí p${e.pid}`;
+    const text = c.text || e.snippet || '';
+
+    let verdict;
+    try {
+      verdict = await clf.classify({ title, text });
+    } catch (err) {
+      // classify() already retries+falls back internally; a throw here is
+      // unexpected. Skip this decision rather than crash the whole source.
+      console.warn(`[nss-sbirka] classify threw for p${e.pid}: ${err.message} — skipping`);
+      continue;
+    }
+    await sleep(requestDelayMs);
+    if (!verdict || !verdict.relevant) continue;
+
+    const summaryText = text || title;
     const summary = summaryText.length > 600 ? summaryText.slice(0, 597) + '...' : summaryText;
     items.push({
       id: decisionId(e.pid),
-      title: detail.title || e.title || `NSS rozhodnutí p${e.pid}`,
+      title,
       url: e.url,
-      pubDate: e.pubDate, // real publish date from the listing (dd.mm.yyyy -> ISO)
-      summary: summary || e.title,
+      pubDate: c.pubDate || e.pubDate, // real publish date (dd.mm.yyyy -> ISO)
+      summary: summary || title,
       sourceId,
       sourceName,
     });
