@@ -1,13 +1,13 @@
-# Firezard weekly legal digest — GitHub Actions scheduled run.
+# Firezard weekly legal digest -- GitHub Actions scheduled run.
 #
 # This is the ACTIVE workflow (promoted from the FIR-23 draft, FIR-28).
 # It only actually runs once the pipeline/ directory is pushed to a GitHub
-# repo and the secrets below are configured — see DEPLOY.md for the exact
+# repo and the secrets below are configured -- see DEPLOY.md for the exact
 # steps (repo create + secrets are an account-holder action).
 #
 # Cadence: Monday 07:30 CEST (summer) / 06:30 CET (winter). GitHub Actions
 # cron is UTC-only and not DST-aware, so we keep ONE cron and accept a 1-hour
-# drift twice a year — irrelevant for a weekly legal digest. Do NOT add a
+# drift twice a year -- irrelevant for a weekly legal digest. Do NOT add a
 # second cron entry to "fix" DST: two entries would fire two runs on the same
 # Monday and double-send.
 
@@ -54,5 +54,22 @@ jobs:
           git config user.name "firezard-bot"
           git config user.email "bot@firezard.local"
           git add data/seen_all.json data/run_log.json output/
-          git diff --cached --quiet || git commit -m "chore: weekly digest run $(date -u +%F)"
-          git push
+          if git diff --cached --quiet; then
+            echo "No digest state changes to persist."
+            exit 0
+          fi
+          git commit -m "chore: weekly digest run $(date -u +%F)"
+          # main can advance between checkout and push (a concurrent workflow or a
+          # human push), which makes a plain push fail with a non-fast-forward
+          # rejection. Rebase our single data commit on top of the latest main and
+          # retry so the run doesn't fail on a harmless race.
+          for attempt in 1 2 3 4 5; do
+            if git push; then exit 0; fi
+            echo "push rejected (attempt $attempt) -- rebasing onto origin/main and retrying"
+            git pull --rebase origin main || {
+              echo "rebase hit a conflict -- data state needs manual resolution" >&2
+              exit 1
+            }
+          done
+          echo "push still failing after 5 attempts" >&2
+          exit 1

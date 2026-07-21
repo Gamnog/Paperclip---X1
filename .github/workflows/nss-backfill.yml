@@ -1,10 +1,10 @@
-# One-time NSS Sbírka history backfill (FIR-25) — manual trigger only.
+# One-time NSS Sbírka history backfill (FIR-25) -- manual trigger only.
 #
 # The weekly digest only scans the newest ~50 NSS decisions, which rarely
 # include an insolvency ruling, so NSS never seeded any history. This workflow
 # walks the full Sbírka archive once, seeds every insolvency-relevant decision
 # into data/seen_all.json, and commits an evidence report to output/. It does
-# NOT email anyone — it is pure seeding, safe to re-run.
+# NOT email anyone -- it is pure seeding, safe to re-run.
 #
 # Trigger: Actions tab -> "NSS Sbírka backfill (one-time)" -> Run workflow,
 # or:  gh workflow run nss-backfill.yml
@@ -54,5 +54,22 @@ jobs:
           git config user.name "firezard-bot"
           git config user.email "bot@firezard.local"
           git add data/ output/   # seen_all.json + incremental text cache + report
-          git diff --cached --quiet || git commit -m "chore(FIR-33): NSS Sbírka backfill (classifier) $(date -u +%F)"
-          git push
+          if git diff --cached --quiet; then
+            echo "No backfill state changes to persist."
+            exit 0
+          fi
+          git commit -m "chore(FIR-33): NSS Sbírka backfill (classifier) $(date -u +%F)"
+          # main can advance between checkout and push (the weekly digest or a
+          # human push), making a plain push fail with a non-fast-forward
+          # rejection. Rebase our single data commit on top of the latest main and
+          # retry so the seeding run doesn't fail on a harmless race.
+          for attempt in 1 2 3 4 5; do
+            if git push; then exit 0; fi
+            echo "push rejected (attempt $attempt) -- rebasing onto origin/main and retrying"
+            git pull --rebase origin main || {
+              echo "rebase hit a conflict -- data state needs manual resolution" >&2
+              exit 1
+            }
+          done
+          echo "push still failing after 5 attempts" >&2
+          exit 1
