@@ -254,17 +254,43 @@ function parseMaxPage(html) {
   return max;
 }
 
-// Pull a clean title + a rich text blob from a decision detail page. The blob
-// (headnote heading + cited statutes + legal thesis) is used as the digest
-// summary for decisions that already passed the stage-1 keyword filter.
+// Extract the inner HTML of the first <div class="jud"> by walking nested
+// <div>/</div> to the *matching* close. This is deliberately NOT a regex:
+// the jud container wraps BOTH the headnote (právní věta) and the full ruling
+// reasoning (odůvodnění) in nested <div>s, so a non-greedy regex to the first
+// `</div></div>` stopped at the end of the headnote block and captured only
+// ~470 chars of an 11k-char ruling (FIR-36). Returns '' when the div is absent;
+// on an unbalanced/truncated page it returns everything after the open tag.
+function extractJudInner(html) {
+  const open = /<div\s+class="jud"[^>]*>/i.exec(html);
+  if (!open) return '';
+  const start = open.index + open[0].length;
+  const tag = /<div\b[^>]*>|<\/div\s*>/gi;
+  tag.lastIndex = start;
+  let depth = 1;
+  let m;
+  while ((m = tag.exec(html))) {
+    if (m[0][1] === '/') {
+      depth -= 1;
+      if (depth === 0) return html.slice(start, m.index);
+    } else {
+      depth += 1;
+    }
+  }
+  return html.slice(start);
+}
+
+// Pull a clean title + the full ruling text from a decision detail page. The
+// text is the entire <div class="jud"> body (headnote + cited statutes + full
+// reasoning) — used both by the relevance classifier and as the digest summary
+// source.
 function parseDecisionDetail(html) {
   const h2 = html.match(/<h2[^>]*>([\s\S]*?)<\/h2>/i);
   const titleFromH2 = h2 ? stripHtml(h2[1]) : '';
 
   // The curated legal content lives in <div CLASS="jud"> ... </div>. The CLASS
   // attribute is upper-cased by the source CMS, hence the case-insensitive match.
-  const jud = html.match(/<div\s+class="jud"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/i);
-  const judText = jud ? stripHtml(jud[1]) : '';
+  const judText = stripHtml(extractJudInner(html));
 
   // Fallback title: the first "právní věta nadpis" (descriptive headnote title).
   let title = titleFromH2;
@@ -479,6 +505,7 @@ module.exports = {
   parseListPage,
   parseDecisionLinks,
   parseDecisionDetail,
+  extractJudInner,
   parseMaxPage,
   parseCzDate,
   searchPageUrl,

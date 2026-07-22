@@ -9,7 +9,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { fetchItems } = require('../sources/nss-sbirka-scrape');
+const { fetchItems, extractJudInner, parseDecisionDetail } = require('../sources/nss-sbirka-scrape');
 
 // --- fixtures ---
 // p1000: NO insolvency keyword in the list title/snippet (plain tax matter),
@@ -58,6 +58,31 @@ async function t(name, fn) {
 async function run() {
   const cachePath = path.join(os.tmpdir(), `nss-cache-test-${process.pid}.json`);
   try { fs.unlinkSync(cachePath); } catch {}
+
+  // FIR-36 regression: the real jud container nests the headnote and the full
+  // reasoning in inner <div>s. The old non-greedy regex stopped at the FIRST
+  // </div></div> and captured only the headnote (~470 of ~11k chars). The
+  // balanced walker must capture the ENTIRE body, past every nested div.
+  await t('extractJudInner: captures full body across nested divs (not just headnote)', async () => {
+    const html = `<h2>Title</h2>
+<div class="jud">
+  <div class="pravni-veta"><div class="nadpis">HEADNOTE</div> k § 1 zákona</div>
+  <div class="oduvodneni">FULL REASONING para 1. <div class="cite">§ 2</div> para 2 END_OF_BODY</div>
+</div>
+<div class="footer">unrelated</div>`;
+    const inner = extractJudInner(html);
+    assert.ok(/HEADNOTE/.test(inner), 'headnote present');
+    assert.ok(/FULL REASONING/.test(inner), 'reasoning present');
+    assert.ok(/END_OF_BODY/.test(inner), 'captures through the last nested div, not just the headnote');
+    assert.ok(!/unrelated/.test(inner), 'stops at the matching close, does not leak the trailing div');
+    const detail = parseDecisionDetail(html);
+    assert.ok(/END_OF_BODY/.test(detail.text), 'parseDecisionDetail exposes the full body');
+    assert.strictEqual(detail.title, 'Title');
+  });
+
+  await t('extractJudInner: absent div -> empty string', async () => {
+    assert.strictEqual(extractJudInner('<h2>x</h2><p>no jud here</p>'), '');
+  });
 
   await t('run 1: no stage-1 gate, classifier decides, jud cached, only relevant returned', async () => {
     const counter = { n: 0 };
