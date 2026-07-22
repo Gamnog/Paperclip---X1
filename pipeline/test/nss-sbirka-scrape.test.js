@@ -9,7 +9,14 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { fetchItems, extractJudInner, parseDecisionDetail } = require('../sources/nss-sbirka-scrape');
+const {
+  fetchItems,
+  refreshCorpus,
+  isFreshCacheEntry,
+  FULLTEXT_CACHE_VERSION,
+  extractJudInner,
+  parseDecisionDetail,
+} = require('../sources/nss-sbirka-scrape');
 
 // --- fixtures ---
 // p1000: NO insolvency keyword in the list title/snippet (plain tax matter),
@@ -172,6 +179,68 @@ async function run() {
       global.setTimeout = realSetTimeout;
       try { fs.unlinkSync(cachePath2); } catch {}
     }
+  });
+
+  // FIR-37: the one-time corpus rebuild. A pre-fix cache holds headnote-only
+  // bodies (schema v<2). refreshCorpus() must re-fetch the FULL body for every
+  // stale entry, mark it v2, keep the full text (Option A — past the old 6k cap),
+  // and leave already-fresh (v2) entries untouched (0 re-fetch).
+  await t('refreshCorpus: re-fetches stale (v<2) entries to full body, marks v2, keeps v2 entries', async () => {
+    const cp = path.join(os.tmpdir(), `nss-cache-refresh-${process.pid}.json`);
+    // A full ruling body deliberately longer than the old 6000-char cap, to prove
+    // Option A keeps the whole thing (no truncation).
+    const longBody = 'k § 100 daňového řádu — ' + 'odůvodnění konkurs '.repeat(600); // ~11k chars
+    const LONG_DETAIL = {
+      1000: `<h2>Daňová pohledávka v konkursu</h2><div class="jud">${longBody}</div></div>`,
+      2000: `<h2>Stavební povolení</h2><div class="jud">běžná stavební věc</div></div>`,
+    };
+    // Seed: p1000 stale (headnote-only, no v); p2000 already fresh (v2).
+    const seeded = {
+      1000: { url: 'https://sbirka.nssoud.cz/cz/danove-rizeni.p1000.html', title: 'old', text: 'k § 100 headnote only' },
+      2000: { url: 'https://sbirka.nssoud.cz/cz/stavebni.p2000.html', title: 'ok', text: 'already full body', v: FULLTEXT_CACHE_VERSION },
+    };
+    fs.writeFileSync(cp, JSON.stringify(seeded), 'utf8');
+
+    const counter = { n: 0 };
+    global.fetch = async (url) => {
+      const m = url.match(/\.p(\d+)\.html/);
+      if (m) { counter.n++; return { ok: true, status: 200, text: async () => LONG_DETAIL[m[1]] }; }
+      throw new Error(`unexpected fetch: ${url}`);
+    };
+
+    try {
+      const res = await refreshCorpus({ cachePath: cp, requestDelayMs: 0 });
+      assert.strictEqual(counter.n, 1, `only the stale entry should be re-fetched, got ${counter.n}`);
+      assert.strictEqual(res.refreshed, 1);
+      assert.strictEqual(res.remaining, 0, 'no stale entries left after refresh');
+
+      const cache = JSON.parse(fs.readFileSync(cp, 'utf8'));
+      // p1000 now carries the FULL body (past the old 6k cap) at v2.
+      assert.strictEqual(cache['1000'].v, FULLTEXT_CACHE_VERSION);
+      assert.ok(cache['1000'].text.length > 6000, `full body kept uncapped, got ${cache['1000'].text.length} chars`);
+      assert.ok(/konkurs/i.test(cache['1000'].text), 'full body content present');
+      assert.ok(cache['1000'].refreshedAt, 'refresh timestamp recorded');
+      // p2000 was already v2 -> untouched.
+      assert.strictEqual(cache['2000'].text, 'already full body', 'fresh entry left untouched');
+
+      // Resume: a second run re-fetches nothing (all v2 now).
+      counter.n = 0;
+      const res2 = await refreshCorpus({ cachePath: cp, requestDelayMs: 0 });
+      assert.strictEqual(counter.n, 0, `re-run should re-fetch 0 entries, got ${counter.n}`);
+      assert.strictEqual(res2.refreshed, 0);
+    } finally {
+      try { fs.unlinkSync(cp); } catch {}
+    }
+  });
+
+  // FIR-37: a normal fetchItems run must also treat a stale (v<2) cached candidate
+  // as needing a re-scrape, not trust the headnote-only body.
+  await t('isFreshCacheEntry: v<2 / missing text is stale, v2 with text is fresh', async () => {
+    assert.strictEqual(isFreshCacheEntry(undefined), false);
+    assert.strictEqual(isFreshCacheEntry({ text: 'x' }), false, 'no version -> stale');
+    assert.strictEqual(isFreshCacheEntry({ text: 'x', v: 1 }), false, 'old version -> stale');
+    assert.strictEqual(isFreshCacheEntry({ v: FULLTEXT_CACHE_VERSION }), false, 'no text -> stale');
+    assert.strictEqual(isFreshCacheEntry({ text: 'x', v: FULLTEXT_CACHE_VERSION }), true, 'v2 + text -> fresh');
   });
 
   try { fs.unlinkSync(cachePath); } catch {}

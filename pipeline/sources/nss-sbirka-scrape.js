@@ -57,10 +57,26 @@ const SEARCH_URL = `${BASE}/cz/vyhledavani`;
 const DEFAULT_CACHE_PATH = path.join(__dirname, '..', 'data', 'nss_sbirka_cache.json');
 const CACHE_SAVE_EVERY = 25; // flush after this many new detail fetches
 
-// Bound the cached body text: the classifier and the digest summary each need
-// only a head slice, and committing full rulings for the whole archive would
-// bloat the repo. Enough to preserve the relevance signal.
-const MAX_CACHE_TEXT_CHARS = 6000;
+// FIR-37 (CEO decision, 2026-07-22: "Option A — keep it all on GitHub"): the
+// full ruling body is stored in git so the archive can serve future cross-field
+// use, not just the insolvency relevance signal. This is therefore NOT a content
+// cap any more — it is only a runaway guard against a pathologically large or
+// malformed detail page. Real NSS rulings are well under it (largest observed
+// ~12k chars), so full bodies are kept intact.
+const MAX_CACHE_TEXT_CHARS = 200000;
+
+// Cache schema version for the stored body text. Bumped to 2 by FIR-36/FIR-37:
+// v2 entries hold the FULL <div class="jud"> body; entries written before the
+// fix (v absent / <2) hold only the ~470-char headnote and must be re-fetched to
+// rebuild the full-text corpus. Stage 2 and refreshCorpus() treat a v<2 entry as
+// stale and re-scrape it; a v2 entry is trusted and skipped (keeps re-runs cheap).
+const FULLTEXT_CACHE_VERSION = 2;
+
+// A cache entry is "fresh" — usable without re-fetching — only when it carries
+// full text at the current schema version. Missing/old-version entries are stale.
+function isFreshCacheEntry(entry) {
+  return !!entry && typeof entry.text === 'string' && (entry.v || 0) >= FULLTEXT_CACHE_VERSION;
+}
 
 // Weekly-monitoring default: stop after this many search-result pages. Override
 // via config.maxPages. 5 pages ≈ 50 newest decisions — comfortably more than a
@@ -420,7 +436,7 @@ async function fetchItems({
   let fetchedSinceFlush = 0;
   const totalCandidates = candidates.size;
   const alreadyCached = [...candidates.values()].filter(
-    (e) => cache[e.pid] && typeof cache[e.pid].text === 'string'
+    (e) => isFreshCacheEntry(cache[e.pid])
   ).length;
   console.log(
     `[nss-sbirka] stage 1 done: ${totalCandidates} unseen candidate(s) ` +
@@ -432,7 +448,7 @@ async function fetchItems({
     if (fullBackfill && detailProcessed % PROGRESS_EVERY_ITEMS === 0) {
       console.log(`[nss-sbirka] stage 2: ${detailProcessed}/${totalCandidates} candidate(s) processed`);
     }
-    if (cache[e.pid] && typeof cache[e.pid].text === 'string') continue; // already scraped
+    if (isFreshCacheEntry(cache[e.pid])) continue; // already scraped at the current full-text version
     let detail;
     try {
       detail = parseDecisionDetail(await fetchHtml(e.url));
@@ -451,6 +467,7 @@ async function fetchItems({
       title: detail.title || e.title || '',
       pubDate: e.pubDate,
       text: String(detail.text || e.snippet || '').slice(0, MAX_CACHE_TEXT_CHARS),
+      v: FULLTEXT_CACHE_VERSION,
       scrapedAt: new Date().toISOString(),
     };
     if (++fetchedSinceFlush >= CACHE_SAVE_EVERY) {
@@ -500,8 +517,100 @@ async function fetchItems({
   return items;
 }
 
+// FIR-37 one-time full-text corpus rebuild. The existing cache already holds a
+// pid for (essentially) every decision in the archive, but with pre-fix
+// headnote-only bodies (v<2). This walks those KNOWN pids directly and re-fetches
+// each detail page for the full <div class="jud"> body — deliberately WITHOUT the
+// stage-1 search pagination or stage-3 classification of fetchItems, because:
+//   - the pids are already known (the cache is the work list), so ~4740 listing
+//     fetches are pure waste here, and
+//   - the seen-store is already seeded from the earlier backfill, so re-running
+//     the ~4700 Haiku classify calls just to rebuild BODIES is waste too.
+// That is what makes this re-crawl fast (~2h vs the ~5-7h full backfill) without
+// touching the FIR-25 429-safe request pacing. Resumable: v2 entries are skipped,
+// the cache is flushed incrementally, and a long stretch of failures stops the
+// run so it commits progress and a re-run picks up where it left off.
+//
+// options.cachePath  — override the cache location (tests).
+// options.requestDelayMs — override inter-request pacing (tests pass 0).
+// options.limit — cap how many entries to refresh (tests / partial runs).
+async function refreshCorpus({
+  cachePath = DEFAULT_CACHE_PATH,
+  requestDelayMs,
+  limit = Infinity,
+} = {}) {
+  const delayMs = requestDelayMs != null
+    ? requestDelayMs
+    : (Number(process.env.NSS_SBIRKA_REQUEST_DELAY_MS) || BACKFILL_REQUEST_DELAY_MS);
+
+  const cache = loadCache(cachePath);
+  const pids = Object.keys(cache);
+  const stale = pids.filter((pid) => !isFreshCacheEntry(cache[pid]));
+  console.log(
+    `[nss-sbirka] corpus refresh: ${pids.length} cached decision(s); ` +
+      `${stale.length} need a full-body re-fetch (v<${FULLTEXT_CACHE_VERSION}); ` +
+      `pacing ${delayMs}ms/request`
+  );
+
+  let refreshed = 0;
+  let failed = 0;
+  let consecutiveFailures = 0;
+  let sinceFlush = 0;
+  let processed = 0;
+  for (const pid of stale) {
+    if (refreshed >= limit) break;
+    processed += 1;
+    const entry = cache[pid] || {};
+    if (!entry.url) {
+      // Can't re-fetch without the stored detail URL; leave it stale.
+      console.warn(`[nss-sbirka] corpus refresh: p${pid} has no cached url — skipping`);
+      continue;
+    }
+    let detail;
+    try {
+      detail = parseDecisionDetail(await fetchHtml(entry.url));
+      consecutiveFailures = 0;
+    } catch (err) {
+      failed += 1;
+      console.warn(`[nss-sbirka] corpus refresh: p${pid} fetch failed: ${err.message} — leaving stale, retry on re-run`);
+      if (++consecutiveFailures >= MAX_CONSECUTIVE_PAGE_FAILURES) {
+        console.warn(`[nss-sbirka] corpus refresh: ${consecutiveFailures} consecutive failures — stopping; a re-run resumes from the committed cache`);
+        break;
+      }
+      await sleep(delayMs);
+      continue;
+    }
+    cache[pid] = {
+      ...entry,
+      title: detail.title || entry.title || '',
+      text: String(detail.text || entry.text || '').slice(0, MAX_CACHE_TEXT_CHARS),
+      v: FULLTEXT_CACHE_VERSION,
+      refreshedAt: new Date().toISOString(),
+    };
+    refreshed += 1;
+    if (processed % PROGRESS_EVERY_ITEMS === 0) {
+      console.log(`[nss-sbirka] corpus refresh: ${processed}/${stale.length} processed, ${refreshed} refreshed, ${failed} failed`);
+    }
+    if (++sinceFlush >= CACHE_SAVE_EVERY) {
+      saveCache(cachePath, cache);
+      sinceFlush = 0;
+    }
+    await sleep(delayMs);
+  }
+  if (sinceFlush > 0) saveCache(cachePath, cache);
+
+  const remaining = Object.keys(cache).filter((pid) => !isFreshCacheEntry(cache[pid])).length;
+  console.log(
+    `[nss-sbirka] corpus refresh done: ${refreshed} refreshed, ${failed} failed this run, ${remaining} still stale`
+  );
+  return { total: pids.length, staleAtStart: stale.length, refreshed, failed, remaining };
+}
+
 module.exports = {
   fetchItems,
+  refreshCorpus,
+  isFreshCacheEntry,
+  FULLTEXT_CACHE_VERSION,
   parseListPage,
   parseDecisionLinks,
   parseDecisionDetail,
