@@ -12,6 +12,7 @@ const path = require('path');
 const {
   fetchItems,
   refreshCorpus,
+  reclassifyCorpus,
   isFreshCacheEntry,
   loadCache,
   saveCache,
@@ -317,6 +318,83 @@ async function run() {
     assert.strictEqual(isFreshCacheEntry({ text: 'x', v: 1 }), false, 'old version -> stale');
     assert.strictEqual(isFreshCacheEntry({ v: FULLTEXT_CACHE_VERSION }), false, 'no text -> stale');
     assert.strictEqual(isFreshCacheEntry({ text: 'x', v: FULLTEXT_CACHE_VERSION }), true, 'v2 + text -> fresh');
+  });
+
+  // FIR-38: re-classify the rebuilt full-text corpus over each decision's FULL
+  // body. Proves: (1) NO network fetches (reads the cache only); (2) stale (v<2)
+  // headnote-only entries are skipped, not classified; (3) already-seen and
+  // already-ledgered decisions are skipped (resume); (4) a newly-relevant
+  // decision is SEEDED (marked seen, via marker) and every classified pid is
+  // recorded in the ledger.
+  await t('reclassifyCorpus: seeds newly-relevant from full body, skips seen/stale/ledgered, no fetches, resumes', async () => {
+    const cp = path.join(os.tmpdir(), `nss-cache-reclass-${process.pid}.json`);
+    cleanupCache(cp);
+    // p1000: full v2 body mentions konkurs -> newly relevant (was rejected on
+    //        headnote-only before). p2000: full v2 body, no insolvency -> not
+    //        relevant. p3000: already seen -> must be skipped. p4000: stale
+    //        (v<2 headnote-only) -> must be skipped (not classified).
+    const cache = {
+      1000: { url: 'https://x/p1000.html', title: 'Daňová pohledávka v konkursu', text: 'k § 100 — po prohlášení konkursu podle 182/2006', pubDate: '2026-04-15T00:00:00.000Z', v: FULLTEXT_CACHE_VERSION },
+      2000: { url: 'https://x/p2000.html', title: 'Stavební povolení', text: 'běžná stavební věc bez vazby', pubDate: '2026-03-10T00:00:00.000Z', v: FULLTEXT_CACHE_VERSION },
+      3000: { url: 'https://x/p3000.html', title: 'Už viděno', text: 'konkurs', pubDate: '2026-02-01T00:00:00.000Z', v: FULLTEXT_CACHE_VERSION },
+      4000: { url: 'https://x/p4000.html', title: 'Stará hlavička', text: 'konkurs headnote only', v: 1 },
+    };
+    fs.writeFileSync(cp, JSON.stringify(cache), 'utf8');
+
+    // Any network call is a test failure — reclassify must be cache-only.
+    global.fetch = async (url) => { throw new Error(`reclassify must not fetch: ${url}`); };
+
+    // Minimal seen-store stub with a via marker; p3000 pre-seeded.
+    const seenData = { 'nss-sbirka-p3000': { via: 'backfill', title: 'Už viděno' } };
+    const seen = {
+      has: (id) => Object.prototype.hasOwnProperty.call(seenData, id),
+      markSeen: (id, meta) => { seenData[id] = { firstSeenAt: 'now', ...meta }; },
+    };
+    const ledger = {};
+    let persists = 0;
+
+    const res = await reclassifyCorpus({
+      cachePath: cp,
+      classifier: stubClassifier, // relevant iff text matches /konkurs/i
+      seen,
+      ledger,
+      persist: () => { persists++; },
+      requestDelayMs: 0,
+    });
+
+    // p1000 + p2000 are the only candidates (p3000 seen, p4000 stale).
+    assert.strictEqual(res.candidates, 2, `expected 2 candidates, got ${res.candidates}`);
+    assert.strictEqual(res.classified, 2, `expected 2 classified, got ${res.classified}`);
+    assert.strictEqual(res.staleCount, 1, 'the v<2 entry is counted stale and skipped');
+    assert.strictEqual(res.newlyRelevant.length, 1, 'only p1000 is newly relevant');
+    assert.strictEqual(res.newlyRelevant[0].id, 'nss-sbirka-p1000');
+
+    // p1000 seeded with the FIR-38 marker; p2000 NOT seeded; p3000 untouched.
+    assert.ok(seenData['nss-sbirka-p1000'], 'p1000 seeded');
+    assert.strictEqual(seenData['nss-sbirka-p1000'].via, 'fir38-reclassify');
+    assert.strictEqual(seenData['nss-sbirka-p1000'].pubDate, '2026-04-15T00:00:00.000Z');
+    assert.ok(!seenData['nss-sbirka-p2000'], 'p2000 (not relevant) not seeded');
+    assert.strictEqual(seenData['nss-sbirka-p3000'].via, 'backfill', 'already-seen entry not overwritten');
+
+    // Ledger records both classified pids (not the stale/seen ones).
+    assert.strictEqual(ledger['1000'].relevant, true);
+    assert.strictEqual(ledger['2000'].relevant, false);
+    assert.ok(!ledger['3000'] && !ledger['4000'], 'seen/stale pids are not ledgered');
+    assert.ok(persists >= 1, 'persist callback invoked at least once (final flush)');
+
+    // Resume: a second run with the populated ledger classifies nothing new.
+    const res2 = await reclassifyCorpus({
+      cachePath: cp,
+      classifier: stubClassifier,
+      seen,
+      ledger,
+      persist: () => {},
+      requestDelayMs: 0,
+    });
+    assert.strictEqual(res2.candidates, 0, 'resume: all candidates already ledgered/seen');
+    assert.strictEqual(res2.classified, 0, 'resume: 0 re-classified');
+
+    cleanupCache(cp);
   });
 
   cleanupCache(cachePath);

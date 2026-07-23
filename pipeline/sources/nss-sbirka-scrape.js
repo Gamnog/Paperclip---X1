@@ -717,9 +717,152 @@ async function refreshCorpus({
   return { total: pids.length, staleAtStart: stale.length, refreshed, failed, remaining };
 }
 
+// FIR-38 one-time re-classification of the rebuilt full-text corpus.
+//
+// Why this exists: the FIR-25/FIR-33 backfill classified each decision over the
+// FIR-36 headnote-only body (~470 chars). The whole FIR-33 premise is that
+// insolvency relevance can live in the ruling BODY, not just the headnote — so
+// that seed classification almost certainly REJECTED some body-relevant
+// decisions that were never seeded into the seen-store. FIR-37 rebuilt the
+// corpus with full v2 bodies; this pass re-runs the classifier over the full
+// body of every cached-but-not-yet-seen decision and seeds any that now qualify.
+//
+// Key property: NO NSS network fetches — it reads the committed cache — so it is
+// fast, cheap, and carries zero 429 risk (the crawl is network-bound; this is
+// purely API-bound against Anthropic). Cleanly decoupled from refreshCorpus.
+//
+// Resumability: every classified pid is recorded in an external `ledger`
+// (pid -> { relevant, v, at }); a decision already in the ledger at the current
+// corpus version, or already in the seen-store, is skipped — so a re-run never
+// re-pays for work already done. Newly-relevant decisions are marked seen via
+// the injected `seen` immediately (default SEED-ONLY: marked seen, NOT emailed;
+// whether any should also be surfaced in a digest is a CEO product call). The
+// caller persists `ledger` + `seen` in the `persist` callback, invoked
+// incrementally so an interrupted run keeps its progress.
+//
+// options.cachePath  — override the cache location (tests).
+// options.classifier — injectable { classify({title,text}) -> {relevant,reason} }.
+// options.keywords   — offline fallback keywords when no classifier injected.
+// options.seen       — { has(id), markSeen(id, meta) } (a SeenStore; stub in tests).
+// options.ledger     — mutated in place: pid -> { relevant, v, at }.
+// options.persist    — () => void, called every CACHE_SAVE_EVERY seeds and at end.
+// options.requestDelayMs — inter-call pacing (default 0; env NSS_RECLASSIFY_DELAY_MS).
+// options.limit      — cap classifications this run (tests / partial runs).
+async function reclassifyCorpus({
+  cachePath = DEFAULT_CACHE_PATH,
+  classifier,
+  keywords = [],
+  seen = { has: () => false, markSeen: () => {} },
+  ledger = {},
+  persist = () => {},
+  requestDelayMs,
+  limit = Infinity,
+} = {}) {
+  const clf = classifier || makeClassifier({ keywords });
+  const delayMs = requestDelayMs != null
+    ? requestDelayMs
+    : (Number(process.env.NSS_RECLASSIFY_DELAY_MS) || 0);
+
+  const cache = loadCache(cachePath);
+  const pids = Object.keys(cache);
+
+  // A decision still carrying a pre-fix (v<2) headnote-only body must NOT be
+  // classified — that is exactly the recall bug this pass exists to fix. Skip &
+  // count them so the operator knows to finish the corpus refresh (FIR-37) first.
+  const staleCount = pids.filter((pid) => !isFreshCacheEntry(cache[pid])).length;
+
+  // Candidates: full-text (v2) decisions not already surfaced/seeded and not
+  // already classified at the current corpus version.
+  const candidates = pids.filter((pid) => {
+    if (!isFreshCacheEntry(cache[pid])) return false;
+    if (seen.has(decisionId(pid))) return false;
+    const led = ledger[pid];
+    if (led && (led.v || 0) >= FULLTEXT_CACHE_VERSION) return false;
+    return true;
+  });
+
+  console.log(
+    `[nss-sbirka] reclassify: ${pids.length} cached decision(s); ` +
+      `${staleCount} still headnote-only (skipped — run corpus refresh first); ` +
+      `${candidates.length} to (re)classify; classifier=${clf.kind}`
+  );
+
+  const newlyRelevant = [];
+  let classified = 0;
+  let relevant = 0;
+  let sinceFlush = 0;
+  for (const pid of candidates) {
+    if (classified >= limit) break;
+    const e = cache[pid] || {};
+    const title = e.title || `NSS rozhodnutí p${pid}`;
+    const text = e.text || '';
+
+    let verdict;
+    try {
+      verdict = await clf.classify({ title, text });
+    } catch (err) {
+      // classify() retries + falls back internally; a throw here is unexpected.
+      // Do NOT ledger it — leave it for a re-run to retry — and don't crash.
+      console.warn(`[nss-sbirka] reclassify: classify threw for p${pid}: ${err.message} — leaving unclassified, retry on re-run`);
+      continue;
+    }
+    classified += 1;
+    const isRelevant = !!(verdict && verdict.relevant);
+    ledger[pid] = { relevant: isRelevant, v: FULLTEXT_CACHE_VERSION, at: new Date().toISOString() };
+
+    if (isRelevant) {
+      relevant += 1;
+      // SEED-ONLY: mark seen so it is treated as history and NOT re-dumped as
+      // "new this week"; this does not email anyone.
+      seen.markSeen(decisionId(pid), {
+        title,
+        url: e.url,
+        sourceId: 'nss-sbirka',
+        pubDate: e.pubDate,
+        via: 'fir38-reclassify',
+      });
+      const summaryText = text || title;
+      const summary = summaryText.length > 600 ? summaryText.slice(0, 597) + '...' : summaryText;
+      newlyRelevant.push({
+        id: decisionId(pid),
+        pid: Number(pid),
+        title,
+        url: e.url,
+        pubDate: e.pubDate,
+        summary,
+        reason: verdict && verdict.reason,
+      });
+    }
+
+    if (classified % PROGRESS_EVERY_ITEMS === 0) {
+      console.log(`[nss-sbirka] reclassify: ${classified}/${candidates.length} classified, ${relevant} newly relevant so far`);
+    }
+    if (++sinceFlush >= CACHE_SAVE_EVERY) {
+      persist();
+      sinceFlush = 0;
+    }
+    if (delayMs) await sleep(delayMs);
+  }
+  if (sinceFlush > 0) persist();
+
+  const remaining = candidates.length - classified;
+  console.log(
+    `[nss-sbirka] reclassify done: ${classified} classified, ${relevant} newly relevant (seeded), ${remaining} candidate(s) left for a re-run`
+  );
+  return {
+    total: pids.length,
+    staleCount,
+    candidates: candidates.length,
+    classified,
+    newlyRelevant,
+    remaining,
+  };
+}
+
 module.exports = {
   fetchItems,
   refreshCorpus,
+  reclassifyCorpus,
   isFreshCacheEntry,
   loadCache,
   saveCache,
