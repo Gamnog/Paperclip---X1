@@ -57,13 +57,20 @@ const SEARCH_URL = `${BASE}/cz/vyhledavani`;
 const DEFAULT_CACHE_PATH = path.join(__dirname, '..', 'data', 'nss_sbirka_cache.json');
 const CACHE_SAVE_EVERY = 25; // flush after this many new detail fetches
 
-// FIR-37 (CEO decision, 2026-07-22: "Option A — keep it all on GitHub"): the
-// full ruling body is stored in git so the archive can serve future cross-field
-// use, not just the insolvency relevance signal. This is therefore NOT a content
-// cap any more — it is only a runaway guard against a pathologically large or
-// malformed detail page. Real NSS rulings are well under it (largest observed
-// ~12k chars), so full bodies are kept intact.
-const MAX_CACHE_TEXT_CHARS = 200000;
+// FIR-37: per-decision stored-text cap. This is a real CONTENT cap, not just a
+// runaway guard.
+//
+// History: the 2026-07-22 "Option A — keep it all on GitHub" decision raised this
+// to 200000 (effectively uncapped, since real rulings top out ~12k chars). The
+// resulting full-body corpus grew data/nss_sbirka_cache.json to 103 MB, which
+// GitHub's pre-receive hook HARD-rejects (>100 MB per file). Option A as a single
+// committed JSON is therefore not physically possible, so this is reverted to a
+// git-safe cap. At 6000 chars the committed cache stays ~15–25 MB (under the
+// limit) while preserving the headnote + opening reasoning — all the insolvency
+// classifier and digest need. A true uncapped cross-field corpus, if the CEO
+// still wants it, must live in external/sharded storage (FIR-37 follow-up), never
+// a single git blob.
+const MAX_CACHE_TEXT_CHARS = 6000;
 
 // Cache schema version for the stored body text. Bumped to 2 by FIR-36/FIR-37:
 // v2 entries hold the FULL <div class="jud"> body; entries written before the

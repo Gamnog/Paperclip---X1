@@ -182,13 +182,14 @@ async function run() {
   });
 
   // FIR-37: the one-time corpus rebuild. A pre-fix cache holds headnote-only
-  // bodies (schema v<2). refreshCorpus() must re-fetch the FULL body for every
-  // stale entry, mark it v2, keep the full text (Option A — past the old 6k cap),
-  // and leave already-fresh (v2) entries untouched (0 re-fetch).
+  // bodies (schema v<2). refreshCorpus() must re-fetch the fuller body for every
+  // stale entry, mark it v2 (capped at MAX_CACHE_TEXT_CHARS = 6000 for git-safe
+  // storage — see the size crash that killed Option A), and leave already-fresh
+  // (v2) entries untouched (0 re-fetch).
   await t('refreshCorpus: re-fetches stale (v<2) entries to full body, marks v2, keeps v2 entries', async () => {
     const cp = path.join(os.tmpdir(), `nss-cache-refresh-${process.pid}.json`);
-    // A full ruling body deliberately longer than the old 6000-char cap, to prove
-    // Option A keeps the whole thing (no truncation).
+    // A ruling body longer than the 6000-char cap, to prove the stored text is
+    // both refreshed (well past the ~470-char headnote) AND capped for git safety.
     const longBody = 'k § 100 daňového řádu — ' + 'odůvodnění konkurs '.repeat(600); // ~11k chars
     const LONG_DETAIL = {
       1000: `<h2>Daňová pohledávka v konkursu</h2><div class="jud">${longBody}</div></div>`,
@@ -215,10 +216,11 @@ async function run() {
       assert.strictEqual(res.remaining, 0, 'no stale entries left after refresh');
 
       const cache = JSON.parse(fs.readFileSync(cp, 'utf8'));
-      // p1000 now carries the FULL body (past the old 6k cap) at v2.
+      // p1000 now carries the refreshed body at v2, capped at 6000 chars for
+      // git-safe storage (well past the old ~470-char headnote, but bounded).
       assert.strictEqual(cache['1000'].v, FULLTEXT_CACHE_VERSION);
-      assert.ok(cache['1000'].text.length > 6000, `full body kept uncapped, got ${cache['1000'].text.length} chars`);
-      assert.ok(/konkurs/i.test(cache['1000'].text), 'full body content present');
+      assert.strictEqual(cache['1000'].text.length, 6000, `body should be capped at 6000, got ${cache['1000'].text.length} chars`);
+      assert.ok(/konkurs/i.test(cache['1000'].text), 'refreshed body content present');
       assert.ok(cache['1000'].refreshedAt, 'refresh timestamp recorded');
       // p2000 was already v2 -> untouched.
       assert.strictEqual(cache['2000'].text, 'already full body', 'fresh entry left untouched');
