@@ -9,7 +9,9 @@
 //
 // This rebuilds the corpus by re-fetching the full <div class="jud"> body for
 // every cached decision whose stored text predates the fix (cache schema v<2).
-// Per the CEO's 2026-07-22 decision (Option A) the full body is kept in git.
+// Per the CEO's decision the full body is kept in git — SHARDED across
+// data/nss_sbirka_cache/shard-NNN.json (each shard <90 MB, each decision written
+// whole into one shard) so the corpus never trips GitHub's 100 MB per-file limit.
 //
 // What it does (and deliberately does NOT do):
 //   - Walks the KNOWN pids in the existing cache directly (no ~4740-page search

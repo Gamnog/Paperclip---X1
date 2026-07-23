@@ -57,20 +57,27 @@ const SEARCH_URL = `${BASE}/cz/vyhledavani`;
 const DEFAULT_CACHE_PATH = path.join(__dirname, '..', 'data', 'nss_sbirka_cache.json');
 const CACHE_SAVE_EVERY = 25; // flush after this many new detail fetches
 
-// FIR-37: per-decision stored-text cap. This is a real CONTENT cap, not just a
-// runaway guard.
+// FIR-37 (CEO decision, 2026-07-23): store the FULL ruling body — this is NOT a
+// content cap, only a runaway guard against a pathologically large / malformed
+// detail page. Real Sbírka rulings top out ~12k chars, so this never trims real
+// content.
 //
-// History: the 2026-07-22 "Option A — keep it all on GitHub" decision raised this
-// to 200000 (effectively uncapped, since real rulings top out ~12k chars). The
-// resulting full-body corpus grew data/nss_sbirka_cache.json to 103 MB, which
-// GitHub's pre-receive hook HARD-rejects (>100 MB per file). Option A as a single
-// committed JSON is therefore not physically possible, so this is reverted to a
-// git-safe cap. At 6000 chars the committed cache stays ~15–25 MB (under the
-// limit) while preserving the headnote + opening reasoning — all the insolvency
-// classifier and digest need. A true uncapped cross-field corpus, if the CEO
-// still wants it, must live in external/sharded storage (FIR-37 follow-up), never
-// a single git blob.
-const MAX_CACHE_TEXT_CHARS = 6000;
+// History: "Option A — keep it all on GitHub" first stored full bodies in a single
+// data/nss_sbirka_cache.json, which grew to 103 MB and hit GitHub's HARD 100 MB
+// per-file limit (pre-receive reject). The CEO's follow-up direction was: "do A but
+// limit the max file size to 90mb so it creates a new file; don't split one
+// decision between 2 files." So the corpus is now SHARDED across
+// data/nss_sbirka_cache/shard-NNN.json — full text kept in git, each shard under
+// SHARD_MAX_BYTES (< the 100 MB limit), each decision written WHOLE into exactly
+// one shard (never split across files). See saveCache/partitionIntoShards below.
+const MAX_CACHE_TEXT_CHARS = 1000000; // ~2 MB UTF-8 worst case; guards against a malformed page, not real content
+
+// Max serialized bytes per shard file. Kept comfortably under GitHub's hard 100 MB
+// per-file limit so a committed shard is never rejected at push. When appending the
+// next decision would push a shard past this, a new shard is started; a single
+// decision is never split across shards. Overridable in tests via
+// NSS_SBIRKA_SHARD_MAX_BYTES.
+const SHARD_MAX_BYTES = 90 * 1024 * 1024; // 90 MB
 
 // Cache schema version for the stored body text. Bumped to 2 by FIR-36/FIR-37:
 // v2 entries hold the FULL <div class="jud"> body; entries written before the
@@ -126,18 +133,115 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// The sharded cache lives in a directory derived from the cache path by stripping
+// the trailing .json: data/nss_sbirka_cache.json -> data/nss_sbirka_cache/. Each
+// shard is data/nss_sbirka_cache/shard-NNN.json. (If the path has no .json suffix
+// we append `.shards` so the directory never collides with the legacy file.)
+function shardDirFor(cachePath) {
+  const stripped = cachePath.replace(/\.json$/i, '');
+  return stripped === cachePath ? `${cachePath}.shards` : stripped;
+}
+
+function shardFileName(i) {
+  return `shard-${String(i).padStart(3, '0')}.json`;
+}
+
+// Load the full pid->entry map. FIR-37: the corpus is sharded across
+// <cacheDir>/shard-NNN.json. For backward-compat we ALSO read the legacy single
+// file (data/nss_sbirka_cache.json) if it is still present — the first saveCache
+// after the migration writes the shards and deletes it. When both exist (only
+// transiently, mid-migration) shard entries win, since shards are the
+// post-migration source of truth.
 function loadCache(cachePath) {
+  const merged = {};
+  // Legacy pre-sharding single-file cache.
   try {
-    return JSON.parse(fs.readFileSync(cachePath, 'utf8')) || {};
-  } catch {
-    return {}; // missing/corrupt cache -> start fresh
+    Object.assign(merged, JSON.parse(fs.readFileSync(cachePath, 'utf8')) || {});
+  } catch { /* missing/corrupt legacy file -> ignore */ }
+  // Sharded cache.
+  const dir = shardDirFor(cachePath);
+  let files;
+  try { files = fs.readdirSync(dir); } catch { files = []; }
+  for (const f of files.filter((n) => /^shard-\d+\.json$/i.test(n)).sort()) {
+    try {
+      Object.assign(merged, JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')) || {});
+    } catch (err) {
+      console.warn(`[nss-sbirka] cache shard ${f} unreadable: ${err.message} — skipping`);
+    }
   }
+  return merged;
+}
+
+// Partition the pid->entry map into shard objects, each serializing to at most
+// maxBytes, WITHOUT ever splitting a single decision across shards (the CEO's
+// "don't split one decision between 2 files"). Pids are emitted in numeric order
+// for a stable, human-readable layout so successive saves diff cleanly. The byte
+// accounting is exact for JSON.stringify(shard) with no whitespace: 2 bytes for
+// the enclosing braces, each entry `"pid":<value>`, entries joined by commas. A
+// lone decision larger than maxBytes still gets its own shard (never split) — real
+// rulings are ~12k chars so this cannot happen in practice, but it degrades safely.
+function partitionIntoShards(cache, maxBytes) {
+  const pids = Object.keys(cache).sort((a, b) => {
+    const na = Number(a);
+    const nb = Number(b);
+    return Number.isFinite(na) && Number.isFinite(nb) ? na - nb : String(a).localeCompare(String(b));
+  });
+  const shards = [];
+  let cur = null;
+  let curBytes = 0;
+  for (const pid of pids) {
+    const pieceBytes = Buffer.byteLength(
+      `${JSON.stringify(String(pid))}:${JSON.stringify(cache[pid])}`,
+      'utf8'
+    );
+    // Adding to an existing shard costs the piece + a joining comma; starting a
+    // fresh shard costs the piece + the two enclosing braces.
+    if (cur && curBytes + pieceBytes + 1 > maxBytes) {
+      shards.push(cur);
+      cur = null;
+    }
+    if (!cur) {
+      cur = {};
+      curBytes = pieceBytes + 2; // first entry + "{" "}"
+    } else {
+      curBytes += pieceBytes + 1; // subsequent entry + ","
+    }
+    cur[pid] = cache[pid];
+  }
+  if (cur) shards.push(cur);
+  return shards;
 }
 
 function saveCache(cachePath, cache) {
+  const maxBytes = Number(process.env.NSS_SBIRKA_SHARD_MAX_BYTES) || SHARD_MAX_BYTES;
+  const dir = shardDirFor(cachePath);
   try {
-    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-    fs.writeFileSync(cachePath, JSON.stringify(cache, null, 0), 'utf8');
+    fs.mkdirSync(dir, { recursive: true });
+    const shards = partitionIntoShards(cache, maxBytes);
+    // Write each shard atomically (tmp + rename) so an interrupted save never
+    // leaves a half-written shard for loadCache to choke on.
+    shards.forEach((shard, i) => {
+      const target = path.join(dir, shardFileName(i));
+      const tmp = `${target}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(shard, null, 0), 'utf8');
+      fs.renameSync(tmp, target);
+    });
+    // Drop orphaned shard files beyond the count we just wrote (the corpus may
+    // re-partition into fewer shards as boundaries shift); otherwise loadCache
+    // would merge stale pids back in.
+    let existing;
+    try { existing = fs.readdirSync(dir); } catch { existing = []; }
+    for (const f of existing) {
+      const m = /^shard-(\d+)\.json$/i.exec(f);
+      if (m && Number(m[1]) >= shards.length) {
+        try { fs.unlinkSync(path.join(dir, f)); } catch { /* best effort */ }
+      }
+    }
+    // Migration: once shards are written, remove the legacy single-file cache so
+    // it isn't merged back on the next load (and so git records the move).
+    if (cachePath !== dir) {
+      try { if (fs.existsSync(cachePath)) fs.unlinkSync(cachePath); } catch { /* best effort */ }
+    }
   } catch (err) {
     // Cache is an optimization, not correctness — never let a write failure
     // sink the whole scrape.
@@ -617,7 +721,12 @@ module.exports = {
   fetchItems,
   refreshCorpus,
   isFreshCacheEntry,
+  loadCache,
+  saveCache,
+  shardDirFor,
+  partitionIntoShards,
   FULLTEXT_CACHE_VERSION,
+  SHARD_MAX_BYTES,
   parseListPage,
   parseDecisionLinks,
   parseDecisionDetail,

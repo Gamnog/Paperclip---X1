@@ -4,7 +4,9 @@
 # (the FIR-36 bug), and cached pids are never re-fetched, so the committed
 # data/nss_sbirka_cache.json is still headnote-only. This workflow re-fetches the
 # full ruling body for every stale (pre-fix) cached decision and commits the
-# rebuilt cache. Per the CEO's Option A decision the full body is kept in git.
+# rebuilt cache. Per the CEO's decision the full body is kept in git, SHARDED
+# across data/nss_sbirka_cache/shard-NNN.json (each <90 MB, each decision whole in
+# one shard) so no single file hits GitHub's 100 MB limit.
 #
 # It does NOT classify, seed, or email -- it only replaces headnote-only bodies
 # with full text. Fast path: it walks the KNOWN pids in the cache (no search
@@ -65,16 +67,20 @@ jobs:
             exit 0
           fi
           # Guard: GitHub hard-rejects any single file >100 MB at the pre-receive
-          # hook, so a too-large cache would make every push fail (and the retry
-          # loop below can't fix a size problem). Fail fast with a clear message
-          # BEFORE committing rather than crash-looping on the push. If this trips,
-          # the per-decision cap (MAX_CACHE_TEXT_CHARS) is too high for git storage
-          # or the corpus must move to external/sharded storage (FIR-37).
-          cache_bytes=$(wc -c < data/nss_sbirka_cache.json)
-          if [ "$cache_bytes" -gt 99000000 ]; then
-            echo "nss_sbirka_cache.json is ${cache_bytes} bytes (>~99 MB) -- exceeds GitHub's 100 MB file limit; refusing to commit. Lower MAX_CACHE_TEXT_CHARS or move the corpus off git." >&2
-            exit 1
-          fi
+          # hook, so a too-large file would make every push fail (and the retry loop
+          # below can't fix a size problem). The corpus is SHARDED under
+          # data/nss_sbirka_cache/ with each shard kept <90 MB in code
+          # (SHARD_MAX_BYTES), but check every cache file as belt-and-suspenders so a
+          # regression can never crash-loop the push. Fail fast with a clear message
+          # BEFORE committing.
+          for f in data/nss_sbirka_cache/*.json data/nss_sbirka_cache.json; do
+            [ -f "$f" ] || continue
+            sz=$(wc -c < "$f")
+            if [ "$sz" -gt 99000000 ]; then
+              echo "$f is ${sz} bytes (>~99 MB) -- exceeds GitHub's 100 MB file limit; refusing to commit. SHARD_MAX_BYTES regressed or a single decision is pathologically large." >&2
+              exit 1
+            fi
+          done
           git commit -m "chore(FIR-37): NSS Sbírka full-text corpus refresh $(date -u +%F)"
           # main can advance between checkout and push (the weekly digest or a
           # human push), making a plain push fail with a non-fast-forward

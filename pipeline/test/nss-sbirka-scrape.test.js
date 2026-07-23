@@ -13,6 +13,9 @@ const {
   fetchItems,
   refreshCorpus,
   isFreshCacheEntry,
+  loadCache,
+  saveCache,
+  shardDirFor,
   FULLTEXT_CACHE_VERSION,
   extractJudInner,
   parseDecisionDetail,
@@ -56,6 +59,13 @@ function makeFetch(detailCounter) {
   };
 }
 
+// Remove both the legacy single-file cache and its shard directory (the corpus is
+// now sharded on disk, so unlinking the .json alone leaves the shards behind).
+function cleanupCache(p) {
+  try { fs.unlinkSync(p); } catch {}
+  try { fs.rmSync(shardDirFor(p), { recursive: true, force: true }); } catch {}
+}
+
 let passed = 0;
 async function t(name, fn) {
   try { await fn(); passed++; console.log(`  ok  ${name}`); }
@@ -64,7 +74,7 @@ async function t(name, fn) {
 
 async function run() {
   const cachePath = path.join(os.tmpdir(), `nss-cache-test-${process.pid}.json`);
-  try { fs.unlinkSync(cachePath); } catch {}
+  cleanupCache(cachePath);
 
   // FIR-36 regression: the real jud container nests the headnote and the full
   // reasoning in inner <div>s. The old non-greedy regex stopped at the FIRST
@@ -110,8 +120,9 @@ async function run() {
     assert.strictEqual(items[0].id, 'nss-sbirka-p1000');
     assert.strictEqual(items[0].pubDate, '2026-04-15T00:00:00.000Z');
     assert.ok(/konkurs/i.test(items[0].summary), 'summary should carry the cached jud body');
-    // Cache holds BOTH decisions' jud text, keyed by pid.
-    const cache = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+    // Cache holds BOTH decisions' jud text, keyed by pid (now sharded on disk —
+    // read it back through loadCache, not the legacy single file).
+    const cache = loadCache(cachePath);
     assert.ok(/konkurs/i.test(cache['1000'].text), 'p1000 jud text cached');
     assert.ok(cache['2000'] && typeof cache['2000'].text === 'string', 'p2000 also cached');
     assert.strictEqual(cache['1000'].url, 'https://sbirka.nssoud.cz/cz/danove-rizeni.p1000.html');
@@ -182,14 +193,13 @@ async function run() {
   });
 
   // FIR-37: the one-time corpus rebuild. A pre-fix cache holds headnote-only
-  // bodies (schema v<2). refreshCorpus() must re-fetch the fuller body for every
-  // stale entry, mark it v2 (capped at MAX_CACHE_TEXT_CHARS = 6000 for git-safe
-  // storage — see the size crash that killed Option A), and leave already-fresh
-  // (v2) entries untouched (0 re-fetch).
+  // bodies (schema v<2). refreshCorpus() must re-fetch the FULL body for every
+  // stale entry (no content cap now — CEO's 2026-07-23 direction), mark it v2, and
+  // leave already-fresh (v2) entries untouched (0 re-fetch).
   await t('refreshCorpus: re-fetches stale (v<2) entries to full body, marks v2, keeps v2 entries', async () => {
     const cp = path.join(os.tmpdir(), `nss-cache-refresh-${process.pid}.json`);
-    // A ruling body longer than the 6000-char cap, to prove the stored text is
-    // both refreshed (well past the ~470-char headnote) AND capped for git safety.
+    // A ruling body far longer than the old 6000-char cap, to prove the FULL body
+    // is stored (well past the ~470-char headnote AND past the retired 6k cap).
     const longBody = 'k § 100 daňového řádu — ' + 'odůvodnění konkurs '.repeat(600); // ~11k chars
     const LONG_DETAIL = {
       1000: `<h2>Daňová pohledávka v konkursu</h2><div class="jud">${longBody}</div></div>`,
@@ -215,11 +225,12 @@ async function run() {
       assert.strictEqual(res.refreshed, 1);
       assert.strictEqual(res.remaining, 0, 'no stale entries left after refresh');
 
-      const cache = JSON.parse(fs.readFileSync(cp, 'utf8'));
-      // p1000 now carries the refreshed body at v2, capped at 6000 chars for
-      // git-safe storage (well past the old ~470-char headnote, but bounded).
+      const cache = loadCache(cp);
+      // p1000 now carries the FULL refreshed body at v2 — no content cap, so the
+      // whole ~11k-char body is stored (well past the old ~470-char headnote and
+      // past the retired 6000-char cap).
       assert.strictEqual(cache['1000'].v, FULLTEXT_CACHE_VERSION);
-      assert.strictEqual(cache['1000'].text.length, 6000, `body should be capped at 6000, got ${cache['1000'].text.length} chars`);
+      assert.ok(cache['1000'].text.length > 10000, `full body should be stored uncapped, got ${cache['1000'].text.length} chars`);
       assert.ok(/konkurs/i.test(cache['1000'].text), 'refreshed body content present');
       assert.ok(cache['1000'].refreshedAt, 'refresh timestamp recorded');
       // p2000 was already v2 -> untouched.
@@ -231,7 +242,70 @@ async function run() {
       assert.strictEqual(counter.n, 0, `re-run should re-fetch 0 entries, got ${counter.n}`);
       assert.strictEqual(res2.refreshed, 0);
     } finally {
-      try { fs.unlinkSync(cp); } catch {}
+      cleanupCache(cp);
+    }
+  });
+
+  // FIR-37: sharded storage. Full bodies are kept in git, but no single file may
+  // exceed GitHub's 100 MB limit, so the cache is split into shard-NNN.json files
+  // each under SHARD_MAX_BYTES — and a single decision is NEVER split across two
+  // shards (CEO's direction). Force a tiny per-shard byte budget so a handful of
+  // entries spill into multiple shards, then prove the invariants.
+  await t('saveCache: shards the corpus under the byte cap, never splitting a decision, round-trips', async () => {
+    const cp = path.join(os.tmpdir(), `nss-cache-shard-${process.pid}.json`);
+    cleanupCache(cp);
+    // 12 decisions, ~2 KB body each. A 5 KB shard cap forces ~1–2 entries/shard.
+    const cache = {};
+    for (let i = 0; i < 12; i++) {
+      const pid = 1000 + i;
+      cache[pid] = {
+        url: `https://sbirka.nssoud.cz/cz/x.p${pid}.html`,
+        title: `Rozhodnutí ${pid}`,
+        text: `odůvodnění konkurs p${pid} `.repeat(80), // ~2 KB (multibyte diacritics)
+        v: FULLTEXT_CACHE_VERSION,
+      };
+    }
+    const prevEnv = process.env.NSS_SBIRKA_SHARD_MAX_BYTES;
+    process.env.NSS_SBIRKA_SHARD_MAX_BYTES = '5120'; // 5 KB
+    try {
+      saveCache(cp, cache);
+
+      const dir = shardDirFor(cp);
+      const shardFiles = fs.readdirSync(dir).filter((f) => /^shard-\d+\.json$/.test(f)).sort();
+      assert.ok(shardFiles.length >= 2, `expected the corpus to split into multiple shards, got ${shardFiles.length}`);
+
+      // No shard file exceeds the byte cap (each is a self-contained JSON object).
+      const seenPids = new Set();
+      for (const f of shardFiles) {
+        const full = path.join(dir, f);
+        const bytes = fs.statSync(full).size;
+        assert.ok(bytes <= 5120, `${f} is ${bytes} bytes, over the 5120 cap`);
+        // Each decision is stored WHOLE in exactly one shard — no pid appears twice.
+        for (const pid of Object.keys(JSON.parse(fs.readFileSync(full, 'utf8')))) {
+          assert.ok(!seenPids.has(pid), `decision ${pid} split/duplicated across shards`);
+          seenPids.add(pid);
+        }
+      }
+      assert.strictEqual(seenPids.size, 12, 'every decision landed in some shard');
+
+      // The legacy single file must be gone (migrated to shards).
+      assert.ok(!fs.existsSync(cp), 'legacy single-file cache removed after migration');
+
+      // Round-trip: loadCache reconstructs the exact same map from the shards.
+      const reloaded = loadCache(cp);
+      assert.deepStrictEqual(reloaded, cache, 'loadCache round-trips the sharded corpus');
+
+      // Shrinking the corpus must delete now-orphaned shard files (else loadCache
+      // would resurrect stale pids).
+      const smaller = { 1000: cache[1000] };
+      saveCache(cp, smaller);
+      const afterFiles = fs.readdirSync(dir).filter((f) => /^shard-\d+\.json$/.test(f));
+      assert.strictEqual(afterFiles.length, 1, `orphaned shards should be pruned, found ${afterFiles.length}`);
+      assert.deepStrictEqual(loadCache(cp), smaller, 'no stale pids resurrected after shrink');
+    } finally {
+      if (prevEnv === undefined) delete process.env.NSS_SBIRKA_SHARD_MAX_BYTES;
+      else process.env.NSS_SBIRKA_SHARD_MAX_BYTES = prevEnv;
+      cleanupCache(cp);
     }
   });
 
@@ -245,7 +319,7 @@ async function run() {
     assert.strictEqual(isFreshCacheEntry({ text: 'x', v: FULLTEXT_CACHE_VERSION }), true, 'v2 + text -> fresh');
   });
 
-  try { fs.unlinkSync(cachePath); } catch {}
+  cleanupCache(cachePath);
   console.log(`\nnss-sbirka-scrape.test.js: ${passed} tests passed`);
 }
 
